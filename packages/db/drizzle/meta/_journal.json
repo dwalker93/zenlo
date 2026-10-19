@@ -1,0 +1,34 @@
+{
+  "version": "7",
+  "dialect": "postgresql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "7",
+      "when": 1791698538575,
+      "tag": "0000_init_v2_6",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1792125036293,
+      "tag": "0001_staff_roles",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1792126618044,
+      "tag": "0002_tracking_unique_per_courier",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1792261807020,
+      "tag": "0003_better_auth_tables",
+      "breakpoints": true
+    }
+  ]
+}
