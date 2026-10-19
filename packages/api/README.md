@@ -6,7 +6,7 @@ Three Hono apps that wire HTTP to `@workspace/domain`. Server-only. Deploy them 
 |---|---|---|---|---|
 | Public | `createPublicApp({ db, authenticate, config })` | `loadPublicConfig` | `PAYHERE_MERCHANT_ID/SECRET/SANDBOX`, `PUBLIC_BASE_URL` (also the CSRF-trusted origin) | `example.com/api` |
 | Admin | `createAdminApp({ db, authenticate, config })` | `loadAdminConfig` | `ADMIN_BASE_URL` (required, the CSRF-trusted origin), `REQUIRE_MFA` (default true), `DUAL_CONTROL_THRESHOLD_CENTS` (default 5000000 = LKR 50,000; 0 = always two people) | `admin.example.com` |
-| Machine | `createMachineApp({ db, config, courier? })` | `loadMachineConfig` | `PAYHERE_MERCHANT_ID/SECRET`, `COURIER_WEBHOOK_SECRET`, `CRON_SECRET`, `AUTO_VERIFY_DELIVERY` | `example.com/api` (webhook/cron paths only) |
+| Machine | `createMachineApp({ db, config, courier? })` | `loadMachineConfig` | `PAYHERE_MERCHANT_ID/SECRET`, `COURIER_WEBHOOK_SECRET`, `CRON_SECRET`, `SYSTEM_ACTOR_ID` (optional, for the payout run), `AUTO_VERIFY_DELIVERY` | `example.com/api` (webhook/cron paths only) |
 
 `createApp` mounts all three in one process (public/machine at `/`, admin at `/admin`) for local dev and tests only. Use the Node.js runtime for money routes.
 Each app has its own `/health`. The public app has no staff, webhook or cron routes; the admin app has no public or machine routes (tested).
@@ -43,7 +43,7 @@ export { handler as GET, handler as POST };
 - Next prefers the specific `/api/auth/*` file over the `[[...route]]` catch-all, so they do not clash.
 - Do not export `runtime` or `dynamic` from these files if you enable Cache Components: they are not allowed there, and the Node.js runtime is what you get anyway. Route handlers are uncached unless you opt in.
 - `next.config.ts`: `transpilePackages: ['@workspace/api', '@workspace/auth', '@workspace/domain', '@workspace/db']`.
-- `vercel.json`: crons for `/api/cron/expire-orders` (every 15 min) and `/api/cron/reconcile` (hourly). Vercel sends `Authorization: Bearer $CRON_SECRET` when `CRON_SECRET` is set.
+- `vercel.json`: crons for `/api/cron/expire-orders` (every 15 min) and `/api/cron/reconcile` (hourly); add `/api/cron/payout-run` (e.g. daily) once `SYSTEM_ACTOR_ID` is set. Vercel sends `Authorization: Bearer $CRON_SECRET` when `CRON_SECRET` is set.
 - PayHere notify URL is already `PUBLIC_BASE_URL/api/webhooks/payhere`.
 - Browser code calls `fetch('/api/orders', { method: 'POST', ... })` from the same origin; the cookie and `Origin` header go along and pass the CSRF guard.
 - Needs the Node.js runtime with a global `WebSocket` (Node 22+) for the Neon driver, or set `neonConfig.webSocketConstructor = ws`.
@@ -60,7 +60,7 @@ export { handler as GET, handler as POST };
 |---|---|---|
 | `POST /webhooks/payhere` | PayHere | verify `md5sig`, then confirm / record failure / flag |
 | `POST /webhooks/courier` | courier | signed event -> shipment status (does NOT pay the seller) |
-| `GET /cron/expire-orders`, `/cron/reconcile` | cron | `Authorization: Bearer $CRON_SECRET`; reconcile answers 500 on any violation so alerting fires |
+| `GET /cron/expire-orders`, `/cron/reconcile`, `/cron/payout-run` | cron | `Authorization: Bearer $CRON_SECRET`; reconcile answers 500 on any violation so alerting fires. `payout-run` creates one PENDING payout per approved seller with a payable balance, acting as the system actor (`SYSTEM_ACTOR_ID`; 503 if unset). A person with `payouts.manage` still starts each transfer. Setup: see [Scheduled payouts](#scheduled-payouts). Answers 500 if any seller errored |
 
 ## Admin app: roles, permissions, MFA, two-person rule
 Staff roles: `admin`, `finance`, `support` (customers and sellers are never staff). **Routes check permissions, not role names**; the role -> permission map lives in `src/permissions.ts`.
@@ -99,8 +99,28 @@ The public and admin apps authenticate with cookies, so state-changing requests 
 - **Courier adapter.** The PromptXpress webhook/API format was not available, so the default is a generic HMAC-signed JSON contract (`courier.ts`).
   Replace it with a `CourierAdapter` for their real API; nothing else changes. Until then, ship/deliver via the admin routes.
 - Environment: see the per-app table above. `PAYHERE_SANDBOX` must be `false` in production. `AUTO_VERIFY_DELIVERY=true` lets a courier "delivered" verify delivery automatically; default off = staff verify.
-- `vercel.json` crons: `/api/cron/expire-orders` every 15 min, `/api/cron/reconcile` hourly.
+- `vercel.json` crons: `/api/cron/expire-orders` every 15 min, `/api/cron/reconcile` hourly, and `/api/cron/payout-run` at your payout cadence (see [Scheduled payouts](#scheduled-payouts); it needs `SYSTEM_ACTOR_ID`).
 - Refund money itself is sent outside this API (manual bank transfer or the PayHere refund API): `request` -> `approve` -> `start`, send ONE refund keyed by the refund id, then `complete` or (only if confirmed not sent) `fail`.
+
+## Scheduled payouts
+`GET /api/cron/payout-run` creates one **pending** payout per approved seller that has a default active payout account and a positive unclaimed balance (up to 200 sellers per call; `more: true` means run it again). It never sends money: a person with `payouts.manage` still starts each transfer, so the two-person rule holds.
+
+1. **Create the system actor** once per environment. It is an inactive user with no roles and no credentials, so it can never sign in or be the second person in a two-person rule. From the repo root:
+   ```
+   DATABASE_URL=... bun packages/auth/scripts/create-system-actor.ts
+   ```
+   (or `bun run create-system-actor` inside `packages/auth`). It prints `SYSTEM_ACTOR_ID=<uuid>` and is safe to run again. The script is `packages/auth/scripts/create-system-actor.ts`; it calls `ensureSystemActor(db)` from `@workspace/domain`, which refuses to reuse an existing `@system.invalid` user that is active or has a role.
+2. **Set `SYSTEM_ACTOR_ID`** on the project that serves `/api/cron` (the public Next.js project, next to `CRON_SECRET`). Until it is set the route answers `503 not_configured` and creates nothing.
+3. **Schedule it** in `vercel.json` at the cadence you want, e.g. daily at 03:00 UTC:
+   ```json
+   { "crons": [
+     { "path": "/api/cron/expire-orders", "schedule": "*/15 * * * *" },
+     { "path": "/api/cron/reconcile", "schedule": "0 * * * *" },
+     { "path": "/api/cron/payout-run", "schedule": "0 3 * * *" }
+   ] }
+   ```
+   Vercel sends `Authorization: Bearer $CRON_SECRET`; the route answers 401 without it and 500 if any seller errored, so cron alerting fires.
+4. Staff then see the pending payouts in the admin app and start them (`POST /admin/payouts/:id/start`).
 
 ## Tests
 `bun test` (needs `DATABASE_URL_TEST`, see the domain README). Every route is exercised through `app.request()` against real PostgreSQL.

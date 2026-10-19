@@ -1,7 +1,7 @@
 import { and, eq, inArray, sql } from 'drizzle-orm';
 import { payoutItems, payouts, sellerLedgerEntries, sellerPayoutAccounts, sellerProfiles } from '@workspace/db/schema';
 import { audit } from './audit';
-import { SeparationOfDutiesError, NoPayoutAccountError, PayoutNotFoundError, PayoutOutcomeUnknownError, PayoutStateError } from './errors';
+import { DomainError, SeparationOfDutiesError, NoPayoutAccountError, PayoutNotFoundError, PayoutOutcomeUnknownError, PayoutStateError } from './errors';
 import type { Db } from './types';
 
 /**
@@ -24,7 +24,7 @@ export async function createPayout(db: Db, sellerId: string, opts: { createdBy?:
   return db.transaction(async (tx) => {
     // Serialise payout runs per seller: a second run waits here, then finds the entries already claimed.
     const [seller] = await tx.select({ id: sellerProfiles.id }).from(sellerProfiles).where(eq(sellerProfiles.id, sellerId)).for('update');
-    if (!seller) throw new Error(`seller ${sellerId} not found`);
+    if (!seller) throw new DomainError('seller_not_found', `seller ${sellerId} not found`, { sellerId });
 
     // Unclaimed = not in a LIVE payout item. Entries only exist for delivered seller orders
     // (or are adjustments), so every entry here is eligible.
@@ -62,7 +62,10 @@ export async function createPayout(db: Db, sellerId: string, opts: { createdBy?:
 
 export interface ScheduledPayoutRun {
   created: { sellerId: string; payoutId: string; amountCents: number }[];
-  /** Nothing to do for these sellers, by design (no payout account, balance not positive). */
+  /**
+   * Second line of defence: the query already excludes sellers without an account or a positive balance, but a
+   * seller can change between the query and createPayout (account removed, balance claimed by a manual payout).
+   */
   skipped: { sellerId: string; reason: 'no_payout_account' | 'nothing_to_pay' | 'non_positive_balance' }[];
   /** Unexpected errors; the run carries on with the other sellers. A non-empty list should alert someone. */
   failed: { sellerId: string; error: string }[];
@@ -74,20 +77,26 @@ export interface ScheduledPayoutRun {
  * Scheduled payout run: one pending payout per approved seller that has unclaimed ledger entries.
  * Payouts are created with `createdBy = systemActorId` and stay `pending`; a person with the payouts permission
  * must still start each transfer, so the two-person rule holds (the system actor can never sign in).
- * Suspended and rejected sellers are skipped. Safe to run twice: createPayout claims entries once.
+ * Suspended and rejected sellers, sellers without a default payout account and sellers whose unclaimed balance is not positive are not selected. Safe to run twice: createPayout claims entries once.
  */
 export async function runScheduledPayouts(db: Db, opts: { systemActorId: string; limit?: number }): Promise<ScheduledPayoutRun> {
   const limit = opts.limit ?? 200;
+  // Only sellers that can actually be paid right now: approved, an active default payout account, and a positive
+  // unclaimed balance. Filtering here (not after the limit) keeps unpayable sellers from filling the batch and
+  // starving payable ones that sort after them.
   const rows = await db
-    .selectDistinct({ sellerId: sellerLedgerEntries.sellerId })
+    .select({ sellerId: sellerLedgerEntries.sellerId })
     .from(sellerLedgerEntries)
     .innerJoin(sellerProfiles, eq(sellerProfiles.id, sellerLedgerEntries.sellerId))
     .where(
       and(
         eq(sellerProfiles.status, 'approved'),
         sql`NOT EXISTS (SELECT 1 FROM ${payoutItems} pi WHERE pi.ledger_entry_id = ${sellerLedgerEntries.id} AND pi.released_at IS NULL)`,
+        sql`EXISTS (SELECT 1 FROM ${sellerPayoutAccounts} a WHERE a.seller_id = ${sellerLedgerEntries.sellerId} AND a.is_active AND a.is_default)`,
       ),
     )
+    .groupBy(sellerLedgerEntries.sellerId)
+    .having(sql`sum(${sellerLedgerEntries.amountCents}) > 0`)
     .orderBy(sellerLedgerEntries.sellerId)
     .limit(limit + 1);
   const run: ScheduledPayoutRun = { created: [], skipped: [], failed: [], more: rows.length > limit };

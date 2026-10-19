@@ -1,4 +1,3 @@
-import 'server-only'; // build-time guard: importing this from a client component fails the Next.js build
 import { Pool } from '@neondatabase/serverless';
 import { drizzle } from 'drizzle-orm/neon-serverless';
 import * as schema from './schema';

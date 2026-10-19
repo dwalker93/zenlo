@@ -26,7 +26,7 @@
     "format": { "cache": false },
     "test": { "cache": false, "env": ["DATABASE_URL_TEST"] },
     "db:generate": { "cache": false },
-    "db:migrate": { "cache": false },
+    "db:migrate": { "cache": false, "passThroughEnv": ["DATABASE_URL_DIRECT"] },
     "dev": {
       "cache": false,
       "persistent": true,

@@ -8,6 +8,8 @@
     "lint": "turbo lint",
     "format": "turbo format",
     "typecheck": "turbo typecheck",
+    "db:generate": "turbo db:generate",
+    "db:migrate": "turbo db:migrate",
     "test": "turbo test --concurrency=1"
   },
   "devDependencies": {

@@ -12,7 +12,7 @@ const authenticate = async (req: Request): Promise<Principal | null> => {
   const h = req.headers.get('x-principal');
   return h ? (JSON.parse(h) as Principal) : null;
 };
-const adminCfg = (o: Partial<AdminConfig> = {}): AdminConfig => ({ requireMfa: true, dualControlThresholdCents: 0, ...o });
+const adminCfg = (o: Partial<AdminConfig> = {}): AdminConfig => ({ requireMfa: true, dualControlThresholdCents: 0, trustedOrigins: ['https://admin.x.test'], ...o });
 const staff = (name: string, roles: Principal['roles'], mfaVerified = true): Principal => ({ userId: ids[name], roles, mfaVerified });
 const adminApp = (o: Partial<AdminConfig> = {}) => createAdminApp({ db: pg.db, authenticate, config: adminCfg(o) });
 async function call(a: { request: (p: string, i: RequestInit) => Response | Promise<Response> }, method: string, path: string, as?: Principal, json?: unknown) {
@@ -66,7 +66,7 @@ describe('permissions', () => {
 
 describe('route isolation', () => {
   test('each app serves only its own routes', async () => {
-    const pub = createPublicApp({ db: pg.db, authenticate, config: { payhere: { merchantId: 'm', merchantSecret: 's', sandbox: true }, publicBaseUrl: 'https://x.test' } });
+    const pub = createPublicApp({ db: pg.db, authenticate, config: { payhere: { merchantId: 'm', merchantSecret: 's', sandbox: true }, publicBaseUrl: 'https://x.test', trustedOrigins: ['https://x.test'] } });
     const machine = createMachineApp({ db: pg.db, config: { payhere: { merchantId: 'm', merchantSecret: 's' }, courierWebhookSecret: 'c', cronSecret: 'k', autoVerifyDelivery: false } });
     const admin = adminApp();
     const a = staff('admin', ['admin']);
@@ -82,7 +82,7 @@ describe('route isolation', () => {
   });
 
   test('the combined dev app still mounts all three', async () => {
-    const cfg = { payhere: { merchantId: 'm', merchantSecret: 's', sandbox: true }, courierWebhookSecret: 'c', cronSecret: 'k', autoVerifyDelivery: false, publicBaseUrl: 'https://x.test', ...adminCfg() } as ApiConfig;
+    const cfg: ApiConfig = { payhere: { merchantId: 'm', merchantSecret: 's', sandbox: true }, courierWebhookSecret: 'c', cronSecret: 'k', autoVerifyDelivery: false, publicBaseUrl: 'https://x.test', publicTrustedOrigins: ['https://x.test'], adminTrustedOrigins: ['https://admin.x.test'], requireMfa: true, dualControlThresholdCents: 0 };
     const app = createApp({ db: pg.db, authenticate, config: cfg });
     expect((await call(app, 'GET', '/health')).status).toBe(200);
     expect((await call(app, 'POST', '/admin/payouts', staff('support', ['support']), {})).status).toBe(403);

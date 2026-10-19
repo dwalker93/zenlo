@@ -3,8 +3,8 @@ export interface PublicConfig {
   payhere: { merchantId: string; merchantSecret: string; sandbox: boolean };
   /** Public origin used for PayHere return/cancel/notify URLs, e.g. https://example.com */
   publicBaseUrl: string;
-  /** Origins allowed to make state-changing browser requests (CSRF guard). Loaders set it to [publicBaseUrl]. */
-  trustedOrigins?: string[];
+  /** Origins allowed to make state-changing browser requests (CSRF guard). Required and non-empty; loaders set it to [publicBaseUrl]. */
+  trustedOrigins: string[];
 }
 /** Admin project: staff only. */
 export interface AdminConfig {
@@ -15,8 +15,8 @@ export interface AdminConfig {
    * (approver != requester, starter != creator). 0 = always two people. Default LKR 50,000.
    */
   dualControlThresholdCents: number;
-  /** Origins allowed to make state-changing browser requests (CSRF guard). The loader sets it to [ADMIN_BASE_URL]. */
-  trustedOrigins?: string[];
+  /** Origins allowed to make state-changing browser requests (CSRF guard). Required and non-empty; the loader sets it to [ADMIN_BASE_URL]. */
+  trustedOrigins: string[];
 }
 /** Machine project: PayHere/courier webhooks and cron. No user sessions. */
 export interface MachineConfig {
@@ -33,8 +33,13 @@ export interface MachineConfig {
   /** Verify delivery automatically when the courier reports every parcel delivered (else staff do it). */
   autoVerifyDelivery: boolean;
 }
-/** Everything, for the combined dev/test app. */
-export type ApiConfig = PublicConfig & AdminConfig & MachineConfig & { payhere: PublicConfig['payhere'] };
+/**
+ * Everything, for the combined dev/test app. The two CSRF origin lists are kept apart (a spread would let one overwrite
+ * the other): createApp hands `publicTrustedOrigins` to the public app and `adminTrustedOrigins` to the admin app.
+ */
+export type ApiConfig = Omit<PublicConfig, 'trustedOrigins'> &
+  Omit<AdminConfig, 'trustedOrigins'> &
+  MachineConfig & { publicTrustedOrigins: string[]; adminTrustedOrigins: string[] };
 
 type Env = Record<string, string | undefined>;
 const need = (env: Env, k: string) => {
@@ -72,5 +77,7 @@ export function loadMachineConfig(env: Env = process.env): MachineConfig {
   };
 }
 export function loadConfig(env: Env = process.env): ApiConfig {
-  return { ...loadPublicConfig(env), ...loadAdminConfig(env), ...loadMachineConfig(env), payhere: loadPublicConfig(env).payhere };
+  const { trustedOrigins: publicTrustedOrigins, ...pub } = loadPublicConfig(env);
+  const { trustedOrigins: adminTrustedOrigins, ...admin } = loadAdminConfig(env);
+  return { ...pub, ...admin, ...loadMachineConfig(env), payhere: pub.payhere, publicTrustedOrigins, adminTrustedOrigins };
 }

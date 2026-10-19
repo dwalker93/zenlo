@@ -19,6 +19,7 @@ const STATUS: Record<string, 400 | 403 | 404 | 409 | 422> = {
   refund_not_found: 404,
   seller_order_not_found: 404,
   payout_not_found: 404,
+  seller_not_found: 404,
   payment_amount_mismatch: 409,
   payment_not_payable: 409,
   order_not_awaiting_payment: 409,

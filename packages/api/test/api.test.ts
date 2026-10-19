@@ -12,6 +12,8 @@ const config: ApiConfig = {
   cronSecret: 'cron-secret',
   autoVerifyDelivery: false,
   publicBaseUrl: 'https://shop.example.test',
+  publicTrustedOrigins: ['https://shop.example.test'],
+  adminTrustedOrigins: ['https://admin.example.test'],
   requireMfa: true,
   dualControlThresholdCents: 5_000_000,
 };
@@ -245,6 +247,33 @@ describe('seller and courier', () => {
   });
 });
 
+describe('courier delivered event on a partially shipped seller order', () => {
+  test('is acknowledged with 200 (not 409), is stored, and the order is verified once the last parcel is delivered', async () => {
+    const o = await paidOrder(pg.db);
+    const sellerP: Principal = { userId: staffId, roles: ['seller'], sellerId: o.sellers[0].sellerId };
+    const ship = (tracking: string, complete: boolean) =>
+      call('POST', `/seller/orders/${o.A.id}/ship`, { as: sellerP, json: { pickupLocationId: o.sellers[0].locationId, trackingNumber: tracking, complete } });
+    const hour = () => new Date(Date.now() + 3600_000).toISOString();
+    const soStatus = async () => (await pg.db.select().from(sellerOrders).where(eq(sellerOrders.id, o.A.id)))[0].status;
+    const courier = (tracking: string) => {
+      const raw = JSON.stringify({ tracking_number: tracking, status: 'delivered', occurred_at: hour() });
+      return call('POST', '/webhooks/courier', { raw, headers: { 'content-type': 'application/json', 'x-signature': signCourierBody(raw, config.courierWebhookSecret) }, a: autoApp });
+    };
+
+    expect((await ship('PS-1', false)).status).toBe(200);
+    expect(await soStatus()).toBe('partially_shipped');
+    const first = await courier('PS-1'); // would have been 409 before
+    expect(first.status).toBe(200);
+    expect(first.body).toMatchObject({ matched: true, applied: true });
+    expect(await soStatus()).toBe('partially_shipped'); // not verifiable yet
+    expect((await pg.db.select().from(shipments).where(eq(shipments.sellerOrderId, o.A.id)))[0].status).toBe('delivered'); // the event was kept
+
+    expect((await ship('PS-2', true)).status).toBe(200);
+    expect((await courier('PS-2')).status).toBe(200);
+    expect(await soStatus()).toBe('delivered'); // every parcel delivered: verified automatically
+  });
+});
+
 describe('admin: payments, refunds, payouts', () => {
   test('bank-transfer confirmation is admin-only and idempotent; card payments cannot be confirmed by hand', async () => {
     const s = await seed(pg.db, { sellers: 1 });
@@ -349,5 +378,40 @@ describe('scheduled payout run (cron)', () => {
     // a finance person (not the system actor) starts it; the two-person rule is satisfied
     const start = await call('POST', `/admin/payouts/${made.payoutId}/start`, { as: adminP });
     expect(start.status).toBe(200);
+  });
+});
+
+describe('PayHere checkout needs the buyer email before anything is committed', () => {
+  test('POST /orders with no usable email answers 422 and leaves no order, payment or reservation behind', async () => {
+    const s = await seed(pg.db, { sellers: 1, stock: 3 });
+    await pg.db.update(users).set({ email: '' }).where(eq(users.id, s.buyerId));
+    const before = await pg.db.select().from(orders).where(eq(orders.buyerId, s.buyerId));
+    const r = await call('POST', '/orders', { as: customer(s.buyerId), json: orderBody(s.sellers[0].variantId, 1, 'payhere') });
+    expect(r.status).toBe(422);
+    expect(r.body.error.code).toBe('email_required');
+    expect(await pg.db.select().from(orders).where(eq(orders.buyerId, s.buyerId))).toHaveLength(before.length);
+    const [inv] = await pg.db.select().from(inventory).where(eq(inventory.id, s.sellers[0].inventoryId));
+    expect(inv.reservedQty).toBe(0);
+    await pg.db.update(users).set({ email: `buyer-${Date.now()}@x.lk` }).where(eq(users.id, s.buyerId)); // free the unique email
+    // bank transfer needs no email and still works
+    expect((await call('POST', '/orders', { as: customer(s.buyerId), json: orderBody(s.sellers[0].variantId, 1, 'bank_transfer') })).status).toBe(201);
+  });
+
+  test('POST /orders/:id/payments with no usable email answers 422 and creates no payment attempt', async () => {
+    const s = await seed(pg.db, { sellers: 1, stock: 3 });
+    const placed = await call('POST', '/orders', { as: customer(s.buyerId), json: orderBody(s.sellers[0].variantId, 1, 'bank_transfer') });
+    await pg.db.update(users).set({ email: '' }).where(eq(users.id, s.buyerId));
+    const r = await call('POST', `/orders/${placed.body.orderId}/payments`, { as: customer(s.buyerId), json: { method: 'payhere' } });
+    expect(r.status).toBe(422);
+    const pays = await pg.db.select().from(payments).where(eq(payments.orderId, placed.body.orderId));
+    expect(pays).toHaveLength(1); // only the original bank-transfer attempt
+  });
+});
+
+describe('admin: payouts for an unknown seller', () => {
+  test('answers 404 seller_not_found, not a 500', async () => {
+    const r = await call('POST', '/admin/payouts', { as: adminP, json: { sellerId: '00000000-0000-4000-8000-00000000dead' } });
+    expect(r.status).toBe(404);
+    expect(r.body.error.code).toBe('seller_not_found');
   });
 });

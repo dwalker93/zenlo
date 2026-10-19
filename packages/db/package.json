@@ -5,7 +5,10 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./client": "./src/client.ts",
+    "./client": {
+      "browser": "./src/browser-blocked.ts",
+      "default": "./src/client.ts"
+    },
     "./schema": "./src/schema/index.ts",
     "./money": "./src/money.ts"
   },

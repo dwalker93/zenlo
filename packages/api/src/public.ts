@@ -21,7 +21,7 @@ export function createPublicApp(deps: PublicAppDeps) {
   const { db, config } = deps;
   const app = new Hono<Env>();
   app.onError(onError);
-  if (config.trustedOrigins?.length) app.use('*', requireTrustedOrigin(config.trustedOrigins));
+  app.use('*', requireTrustedOrigin(config.trustedOrigins)); // throws at startup if the list is empty
   const user = requireUser(deps.authenticate);
 
   async function emailOf(userId: string) {
@@ -51,12 +51,13 @@ export function createPublicApp(deps: PublicAppDeps) {
   app.post('/orders', user, requireRole('customer'), async (c) => {
     const body = await jsonBody(c, placeOrderBody);
     const buyerId = principalOf(c).userId;
+    // Resolve the email BEFORE anything is committed: a 422 after placeOrder would leave reserved stock and a pending payment behind.
+    const email = body.paymentMethod === 'payhere' ? await emailOf(buyerId) : undefined;
     const placed = await placeOrder(db, { buyerId, ...body });
     const sh = body.shipping;
-    const customer: CheckoutCustomer | undefined =
-      body.paymentMethod === 'payhere'
-        ? { fullName: sh.fullName, email: await emailOf(buyerId), phone: sh.phone, address: [sh.line1, sh.line2].filter(Boolean).join(', '), city: sh.city }
-        : undefined;
+    const customer: CheckoutCustomer | undefined = email
+      ? { fullName: sh.fullName, email, phone: sh.phone, address: [sh.line1, sh.line2].filter(Boolean).join(', '), city: sh.city }
+      : undefined;
     return c.json(
       {
         ...placed,
@@ -71,11 +72,11 @@ export function createPublicApp(deps: PublicAppDeps) {
     const { method } = await jsonBody(c, z.object({ method: z.enum(['bank_transfer', 'payhere']) }));
     const [o] = await db.select().from(orders).where(and(eq(orders.id, orderId), eq(orders.buyerId, principalOf(c).userId)));
     if (!o) throw new HttpError(404, 'order_not_found', 'Order not found'); // also hides other people's orders
+    const email = method === 'payhere' ? await emailOf(o.buyerId) : undefined; // before the payment attempt is created
     const { paymentId } = await createPaymentAttempt(db, orderId, method);
-    const customer: CheckoutCustomer | undefined =
-      method === 'payhere'
-        ? { fullName: o.shipFullName, email: await emailOf(o.buyerId), phone: o.shipPhone, address: [o.shipLine1, o.shipLine2].filter(Boolean).join(', '), city: o.shipCity }
-        : undefined;
+    const customer: CheckoutCustomer | undefined = email
+      ? { fullName: o.shipFullName, email, phone: o.shipPhone, address: [o.shipLine1, o.shipLine2].filter(Boolean).join(', '), city: o.shipCity }
+      : undefined;
     return c.json({ paymentId, payhere: customer ? payhereCheckout({ paymentId, amountCents: o.totalCents, currency: o.currency, orderNumber: o.orderNumber, customer }) : undefined }, 201);
   });
 

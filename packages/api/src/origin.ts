@@ -8,7 +8,9 @@ const norm = (o: string) => o.trim().replace(/\/$/, '').toLowerCase();
  * origins. Browsers always send Origin on cross-origin writes; when it is absent we fall back to Sec-Fetch-Site,
  * and requests with neither (curl, server-to-server) are allowed because they carry no ambient browser cookies.
  */
-export const requireTrustedOrigin = (trusted: readonly string[]): MiddlewareHandler => {
+export const requireTrustedOrigin = (trusted: readonly string[] | undefined): MiddlewareHandler => {
+  // Fail closed: an empty list would not mean "allow nothing" to a reader, and silently skipping the guard is worse.
+  if (!trusted || trusted.length === 0) throw new Error('trustedOrigins must list at least one origin (CSRF guard)');
   const allowed = new Set(trusted.map(norm));
   return async (c, next) => {
     if (c.req.method === 'GET' || c.req.method === 'HEAD' || c.req.method === 'OPTIONS') return next();
