@@ -15,32 +15,30 @@
 export function returnedCommissionTotal(
   cumulativeItemRefunded: number,
   commissionCents: number,
-  subtotalCents: number
+  subtotalCents: number,
 ): number {
   for (const [name, v] of [
-    ["cumulativeItemRefunded", cumulativeItemRefunded],
-    ["commissionCents", commissionCents],
-    ["subtotalCents", subtotalCents],
+    ['cumulativeItemRefunded', cumulativeItemRefunded],
+    ['commissionCents', commissionCents],
+    ['subtotalCents', subtotalCents],
   ] as const) {
     if (!Number.isSafeInteger(v) || v < 0) {
-      throw new RangeError(`${name} must be a non-negative safe integer`)
+      throw new RangeError(`${name} must be a non-negative safe integer`);
     }
   }
   // Validate first, then short-circuit: a zero subtotal only admits zero
   // refunded and zero commission (the range checks below enforce that).
   if (cumulativeItemRefunded > subtotalCents) {
-    throw new RangeError(
-      "cumulative refunded item amount must be between 0 and the subtotal"
-    )
+    throw new RangeError('cumulative refunded item amount must be between 0 and the subtotal');
   }
   if (commissionCents > subtotalCents) {
-    throw new RangeError("commission must be between 0 and the subtotal")
+    throw new RangeError('commission must be between 0 and the subtotal');
   }
-  if (subtotalCents === 0) return 0
-  const c = BigInt(cumulativeItemRefunded)
-  const com = BigInt(commissionCents)
-  const sub = BigInt(subtotalCents)
-  return Number((2n * c * com + sub) / (2n * sub))
+  if (subtotalCents === 0) return 0;
+  const c = BigInt(cumulativeItemRefunded);
+  const com = BigInt(commissionCents);
+  const sub = BigInt(subtotalCents);
+  return Number((2n * c * com + sub) / (2n * sub));
 }
 
 /**
@@ -49,18 +47,18 @@ export function returnedCommissionTotal(
  *   returned_total(c_after) - SUM(commission_returned of earlier succeeded allocations)
  */
 export function commissionReturnedForAllocation(args: {
-  priorItemRefunded: number // cumulative succeeded item refunds BEFORE this allocation
-  priorCommissionReturned: number // SUM(commission_returned) of those earlier allocations
-  itemAmount: number // this allocation's item part
-  commissionCents: number
-  subtotalCents: number
+  priorItemRefunded: number; // cumulative succeeded item refunds BEFORE this allocation
+  priorCommissionReturned: number; // SUM(commission_returned) of those earlier allocations
+  itemAmount: number; // this allocation's item part
+  commissionCents: number;
+  subtotalCents: number;
 }): number {
   const after = returnedCommissionTotal(
     args.priorItemRefunded + args.itemAmount,
     args.commissionCents,
-    args.subtotalCents
-  )
-  return after - args.priorCommissionReturned
+    args.subtotalCents,
+  );
+  return after - args.priorCommissionReturned;
 }
 
 /**
@@ -68,10 +66,7 @@ export function commissionReturnedForAllocation(args: {
  * negative). Returns 0 when there is nothing to post (delivery-only refund,
  * or 100% commission): the caller must then skip the ledger row.
  */
-export function refundLedgerAmount(
-  itemAmount: number,
-  commissionReturned: number
-): number {
-  const merchandise = itemAmount - commissionReturned
-  return merchandise === 0 ? 0 : -merchandise
+export function refundLedgerAmount(itemAmount: number, commissionReturned: number): number {
+  const merchandise = itemAmount - commissionReturned;
+  return merchandise === 0 ? 0 : -merchandise;
 }

@@ -1,4 +1,4 @@
-import { sql } from "drizzle-orm"
+import { sql } from 'drizzle-orm';
 import {
   check,
   index,
@@ -7,55 +7,54 @@ import {
   primaryKey,
   uniqueIndex,
   uuid,
-} from "drizzle-orm/pg-core"
+} from 'drizzle-orm/pg-core';
+import { createdAt, pk, updatedAt } from './_helpers';
+import { productVariants, products } from './catalog';
+import { users } from './identity';
 
-import { createdAt, pk, updatedAt } from "./_helpers"
-import { productVariants, products } from "./catalog"
-import { users } from "./identity"
-
-export const carts = pgTable("carts", {
+export const carts = pgTable('carts', {
   id: pk(),
-  userId: uuid("user_id")
+  userId: uuid('user_id')
     .notNull()
     .unique()
-    .references(() => users.id, { onDelete: "cascade" }),
+    .references(() => users.id, { onDelete: 'cascade' }),
   createdAt: createdAt(),
   updatedAt: updatedAt(),
-})
+});
 
 export const cartItems = pgTable(
-  "cart_items",
+  'cart_items',
   {
     id: pk(),
-    cartId: uuid("cart_id")
+    cartId: uuid('cart_id')
       .notNull()
-      .references(() => carts.id, { onDelete: "cascade" }),
-    variantId: uuid("variant_id")
+      .references(() => carts.id, { onDelete: 'cascade' }),
+    variantId: uuid('variant_id')
       .notNull()
       .references(() => productVariants.id),
-    quantity: integer("quantity").notNull(),
+    quantity: integer('quantity').notNull(),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
   (t) => [
-    uniqueIndex("cart_items_cart_variant_uq").on(t.cartId, t.variantId),
-    check("cart_items_qty_positive", sql`${t.quantity} > 0`),
-  ]
-)
+    uniqueIndex('cart_items_cart_variant_uq').on(t.cartId, t.variantId),
+    check('cart_items_qty_positive', sql`${t.quantity} > 0`),
+  ],
+);
 
 export const favorites = pgTable(
-  "favorites",
+  'favorites',
   {
-    userId: uuid("user_id")
+    userId: uuid('user_id')
       .notNull()
-      .references(() => users.id, { onDelete: "cascade" }),
-    productId: uuid("product_id")
+      .references(() => users.id, { onDelete: 'cascade' }),
+    productId: uuid('product_id')
       .notNull()
-      .references(() => products.id, { onDelete: "cascade" }),
+      .references(() => products.id, { onDelete: 'cascade' }),
     createdAt: createdAt(),
   },
   (t) => [
     primaryKey({ columns: [t.userId, t.productId] }),
-    index("favorites_product_idx").on(t.productId),
-  ]
-)
+    index('favorites_product_idx').on(t.productId),
+  ],
+);

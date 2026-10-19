@@ -29,6 +29,20 @@
       "when": 1792261807020,
       "tag": "0003_better_auth_tables",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1792386116391,
+      "tag": "0004_variant_sku_per_seller",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1792386768912,
+      "tag": "0005_ledger_sign_payout_item_seller",
+      "breakpoints": true
     }
   ]
 }
