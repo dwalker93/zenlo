@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { eq, sql } from 'drizzle-orm';
-import { inventory, inventoryMovements, orderItems, orders, payments, productVariants, sellerOrders } from '@workspace/db/schema';
+import { platformSettings, inventory, inventoryMovements, orderItems, orders, payments, productVariants, sellerOrders } from '@workspace/db/schema';
 import { InvalidOrderError, MAX_QUANTITY, OutOfStockError, VariantUnavailableError, placeOrder } from '../src';
 import { createPgTestDb, seed, shipping, type PgTest } from './pg';
 
@@ -186,5 +186,50 @@ describe('checkout bounds', () => {
       ).rejects.toBeInstanceOf(InvalidOrderError);
     }
     expect((await stockOf(s.inventoryId)).reservedQty).toBe(0);
+  });
+});
+
+describe('platform settings are validated', () => {
+  const setSetting = (key: string, value: unknown) =>
+    pg.db.insert(platformSettings).values({ key, value }).onConflictDoUpdate({ target: platformSettings.key, set: { value } });
+  const clear = () => pg.db.delete(platformSettings);
+  afterAll(clear);
+
+  test.each([12.5, -1, 10001, 'ten', true])('a bad default_commission_bps (%p) falls back to 10%', async (bad) => {
+    await clear();
+    await setSetting('default_commission_bps', bad);
+    const { buyerId, sellers } = await seed(pg.db, { stock: 5 });
+    const placed = await placeOrder(pg.db, {
+      buyerId, paymentMethod: 'bank_transfer', shipping, items: [{ variantId: sellers[0].variantId, quantity: 1 }], calculateDeliveryFeeCents: () => 0,
+    });
+    const [so] = await pg.db.select().from(sellerOrders).where(eq(sellerOrders.orderId, placed.orderId));
+    expect(so.commissionCents).toBe(Math.round(so.subtotalCents * 0.1));
+  });
+
+  test.each([0, -5, 1e9])('a bad payment_window_hours (%p) falls back to 48h', async (bad) => {
+    await clear();
+    await setSetting('payment_window_hours', bad);
+    const { buyerId, sellers } = await seed(pg.db, { stock: 5 });
+    const before = Date.now();
+    const placed = await placeOrder(pg.db, {
+      buyerId, paymentMethod: 'bank_transfer', shipping, items: [{ variantId: sellers[0].variantId, quantity: 1 }], calculateDeliveryFeeCents: () => 0,
+    });
+    const hours = (placed.paymentDueAt.getTime() - before) / 3600_000;
+    expect(hours).toBeGreaterThan(47.9);
+    expect(hours).toBeLessThan(48.1);
+  });
+
+  test('valid values are used', async () => {
+    await clear();
+    await setSetting('default_commission_bps', 1250);
+    await setSetting('payment_window_hours', 24);
+    const { buyerId, sellers } = await seed(pg.db, { stock: 5 });
+    const before = Date.now();
+    const placed = await placeOrder(pg.db, {
+      buyerId, paymentMethod: 'bank_transfer', shipping, items: [{ variantId: sellers[0].variantId, quantity: 1 }], calculateDeliveryFeeCents: () => 0,
+    });
+    const [so] = await pg.db.select().from(sellerOrders).where(eq(sellerOrders.orderId, placed.orderId));
+    expect(so.commissionCents).toBe(Math.round(so.subtotalCents * 0.125));
+    expect(Math.round((placed.paymentDueAt.getTime() - before) / 3600_000)).toBe(24);
   });
 });

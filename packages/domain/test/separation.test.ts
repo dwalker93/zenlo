@@ -35,6 +35,13 @@ describe('refund two-person rule', () => {
     expect(rows.find((r) => r.action === 'refund.requested')?.actorId).toBe(a);
   });
 
+  test('a refund with no recorded requester cannot be approved at/above the threshold', async () => {
+    const o = await deliveredOrder();
+    const { refundId } = await requestRefund(pg.db, { orderId: o.orderId, lines: [{ sellerOrderId: o.A.id, itemAmountCents: 1000, deliveryAmountCents: 0 }] });
+    await expect(approveRefund(pg.db, refundId, { approvedBy: b, dualControlThresholdCents: 1000 })).rejects.toBeInstanceOf(SeparationOfDutiesError);
+    await approveRefund(pg.db, refundId, { approvedBy: b }); // no threshold configured: allowed
+  });
+
   test('below the threshold, or with no threshold, the same person may do both', async () => {
     const o = await deliveredOrder();
     await approveRefund(pg.db, await reqRefund(o, a), { approvedBy: a, dualControlThresholdCents: 1001 });
@@ -53,5 +60,14 @@ describe('payout two-person rule', () => {
     expect((await pg.db.select().from(payouts).where(eq(payouts.id, made.payoutId)))[0].status).toBe('pending');
     await startPayout(pg.db, made.payoutId, b, { dualControlThresholdCents: 0 });
     expect((await pg.db.select().from(payouts).where(eq(payouts.id, made.payoutId)))[0].status).toBe('processing');
+  });
+
+  test('a payout with no recorded creator cannot be started at/above the threshold', async () => {
+    const o = await deliveredOrder();
+    await addPayoutAccount(pg.db, o.sellers[0].sellerId);
+    const made = await createPayout(pg.db, o.sellers[0].sellerId); // no createdBy
+    if (!made.created) throw new Error('expected a payout');
+    await expect(startPayout(pg.db, made.payoutId, a, { dualControlThresholdCents: 0 })).rejects.toBeInstanceOf(SeparationOfDutiesError);
+    await startPayout(pg.db, made.payoutId, a); // no threshold configured: allowed
   });
 });
