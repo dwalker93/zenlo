@@ -156,8 +156,32 @@ describe('ledger policy for refunds around delivery', () => {
       if (refunds[0].createdAt.getTime() === byType(es, 'sale')[0].createdAt.getTime()) byDelivery++; else byRefund++;
       await reconcile();
     }
+    // Which side wins is timing; the invariants above are what matter. Counts are informational only.
     console.log(`refund-vs-delivery race: debit posted by delivery=${byDelivery}, by refund=${byRefund}`);
-    expect(byDelivery).toBeGreaterThan(0);
-    expect(byRefund).toBeGreaterThan(0);
+    expect(byDelivery + byRefund).toBe(40);
   });
+
+  // The two orderings, run one after the other so neither depends on timing.
+  const ordered = async (first: 'refund' | 'delivery') => {
+    const o = await paidOrder(pg.db);
+    await markShipped(pg.db, o.A.id, o.sellers[0].locationId);
+    const { refundId } = await reserveRefund(pg.db, { orderId: o.orderId, lines: [line(o.A.id, 100000)] });
+    await startRefundProcessing(pg.db, refundId);
+    if (first === 'refund') {
+      await completeRefund(pg.db, refundId);
+      expect(await entries(o.A.id)).toHaveLength(0); // not delivered yet: nothing to reverse
+      await verifyDelivery(pg.db, o.A.id);
+    } else {
+      await verifyDelivery(pg.db, o.A.id);
+      await completeRefund(pg.db, refundId);
+    }
+    const es = await entries(o.A.id);
+    expect(byType(es, 'sale')).toHaveLength(1);
+    expect(byType(es, 'commission')).toHaveLength(1);
+    expect(byType(es, 'refund')).toHaveLength(1);
+    expect(net(es)).toBe(300000 - 30000 - 90000);
+    await reconcile();
+  };
+  test('refund completes before delivery is verified: delivery posts the debit', () => ordered('refund'));
+  test('delivery is verified before the refund completes: the refund posts the debit', () => ordered('delivery'));
 });

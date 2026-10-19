@@ -263,9 +263,33 @@ describe('completion under concurrency', () => {
       }
       expect(await reconcileRefunds(pg.db)).toEqual([]);
     }
+    // Which side wins is timing; the invariants above are what matter. Counts are informational only.
     console.log(`success-vs-failure race: succeeded=${succeeded} failed=${failed}`);
-    expect(succeeded).toBeGreaterThan(0);
-    expect(failed).toBeGreaterThan(0);
+    expect(succeeded + failed).toBe(40);
+  });
+
+  // The two orderings, run one after the other so neither depends on timing.
+  test('success first: a later failure is refused and the ledger debit stays', async () => {
+    const o = await paidOrder();
+    const { refundId } = await reserveRefund(pg.db, { orderId: o.orderId, lines: [line(o.A.id, 100000)] });
+    await send(refundId);
+    await completeRefund(pg.db, refundId);
+    await expect(failRefund(pg.db, refundId)).rejects.toBeInstanceOf(RefundStateError);
+    expect(await status(refundId)).toBe('succeeded');
+    expect(await ledgerFor(o.A.id)).toHaveLength(1);
+    expect((await ordRow(o.orderId)).refundedCents).toBe(100000);
+    expect(await reconcileRefunds(pg.db)).toEqual([]);
+  });
+  test('failure first: a later success is refused and nothing is posted', async () => {
+    const o = await paidOrder();
+    const { refundId } = await reserveRefund(pg.db, { orderId: o.orderId, lines: [line(o.A.id, 100000)] });
+    await send(refundId);
+    await failRefund(pg.db, refundId);
+    await expect(completeRefund(pg.db, refundId)).rejects.toBeInstanceOf(RefundStateError);
+    expect(await status(refundId)).toBe('failed');
+    expect(await ledgerFor(o.A.id)).toHaveLength(0);
+    expect((await ordRow(o.orderId)).refundedCents).toBe(0);
+    expect(await reconcileRefunds(pg.db)).toEqual([]);
   });
 });
 

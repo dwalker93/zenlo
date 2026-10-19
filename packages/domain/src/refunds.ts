@@ -134,7 +134,9 @@ export async function approveRefund(
         .from(auditLogs)
         .where(and(eq(auditLogs.action, 'refund.requested'), eq(auditLogs.entityId, refundId)))
         .limit(1);
-      if (req?.actorId && req.actorId === opts.approvedBy) {
+      // A refund with no recorded requester cannot prove the two-person rule, so it is refused too.
+      if (!req?.actorId) throw new SeparationOfDutiesError('the requester of a refund of this size must be identified', { refundId });
+      if (req.actorId === opts.approvedBy) {
         throw new SeparationOfDutiesError('a refund of this size must be approved by someone other than the person who requested it', { refundId });
       }
     }

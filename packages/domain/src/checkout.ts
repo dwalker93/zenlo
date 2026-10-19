@@ -79,10 +79,15 @@ function orderNumber(now: Date) {
   return `ORD-${now.getTime().toString(36).toUpperCase()}-${rand}`;
 }
 
-async function readNumberSetting(tx: Db, key: string, fallback: number) {
+// platform_settings is one editable row per key, so a bad value must never break
+// checkout: anything out of range falls back to the built-in default.
+async function readNumberSetting(tx: Db, key: string, fallback: number, valid: (n: number) => boolean) {
   const [row] = await tx.select().from(platformSettings).where(eq(platformSettings.key, key));
-  return typeof row?.value === 'number' && Number.isFinite(row.value) ? row.value : fallback;
+  return typeof row?.value === 'number' && valid(row.value) ? row.value : fallback;
 }
+const isValidCommissionBps = (n: number) => Number.isInteger(n) && n >= 0 && n <= 10000;
+// Finite, > 0, and capped so the due date is a real Date (1 year)
+const isValidPaymentWindowHours = (n: number) => Number.isFinite(n) && n > 0 && n <= 24 * 365;
 
 /**
  * Checkout. One transaction:
@@ -166,11 +171,11 @@ export async function placeOrder(db: Db, input: PlaceOrderInput): Promise<Placed
     }
 
     // 4. group by seller, price, write
-    const defaultBps = await readNumberSetting(tx, 'default_commission_bps', DEFAULT_COMMISSION_BPS);
+    const defaultBps = await readNumberSetting(tx, 'default_commission_bps', DEFAULT_COMMISSION_BPS, isValidCommissionBps);
     const windowHours =
       input.paymentMethod === 'payhere'
         ? PAYHERE_WINDOW_HOURS
-        : await readNumberSetting(tx, 'payment_window_hours', DEFAULT_PAYMENT_WINDOW_HOURS);
+        : await readNumberSetting(tx, 'payment_window_hours', DEFAULT_PAYMENT_WINDOW_HOURS, isValidPaymentWindowHours);
     const paymentDueAt = new Date(now.getTime() + windowHours * 3600_000);
 
     const groups = new Map<string, { sellerName: string; bps: number; lines: { v: (typeof variants)[number]; qty: number }[] }>();

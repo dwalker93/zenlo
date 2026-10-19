@@ -58,6 +58,6 @@ Next.js build. `test/server-only.test.ts` proves the real package throws outside
 
 ## Separation of duties
 `requestRefund({ requestedBy })` writes a `refund.requested` audit row. `approveRefund(db, id, { approvedBy, dualControlThresholdCents })` refuses
-(`SeparationOfDutiesError`) when the refund is at or above the threshold and the approver is the requester (or is unknown); it writes `refund.approved`.
+(`SeparationOfDutiesError`) when the refund is at or above the threshold and the approver is the requester (or the approver, or the original requester, is unknown); it writes `refund.approved`.
 `startPayout(db, id, actorId, { dualControlThresholdCents })` refuses when the payout is at or above the threshold and `actorId` created it.
 Omit the threshold to disable the rule; `0` means always two people.

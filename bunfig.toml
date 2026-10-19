@@ -2,4 +2,6 @@
 preload = [
   "./packages/db/test/preload.ts",
   "./packages/domain/test/preload.ts",
+  "./packages/api/test/preload.ts",
+
 ]

@@ -60,6 +60,50 @@ export async function createPayout(db: Db, sellerId: string, opts: { createdBy?:
   });
 }
 
+export interface ScheduledPayoutRun {
+  created: { sellerId: string; payoutId: string; amountCents: number }[];
+  /** Nothing to do for these sellers, by design (no payout account, balance not positive). */
+  skipped: { sellerId: string; reason: 'no_payout_account' | 'nothing_to_pay' | 'non_positive_balance' }[];
+  /** Unexpected errors; the run carries on with the other sellers. A non-empty list should alert someone. */
+  failed: { sellerId: string; error: string }[];
+  /** True when more sellers than `limit` were waiting; the next run picks them up. */
+  more: boolean;
+}
+
+/**
+ * Scheduled payout run: one pending payout per approved seller that has unclaimed ledger entries.
+ * Payouts are created with `createdBy = systemActorId` and stay `pending`; a person with the payouts permission
+ * must still start each transfer, so the two-person rule holds (the system actor can never sign in).
+ * Suspended and rejected sellers are skipped. Safe to run twice: createPayout claims entries once.
+ */
+export async function runScheduledPayouts(db: Db, opts: { systemActorId: string; limit?: number }): Promise<ScheduledPayoutRun> {
+  const limit = opts.limit ?? 200;
+  const rows = await db
+    .selectDistinct({ sellerId: sellerLedgerEntries.sellerId })
+    .from(sellerLedgerEntries)
+    .innerJoin(sellerProfiles, eq(sellerProfiles.id, sellerLedgerEntries.sellerId))
+    .where(
+      and(
+        eq(sellerProfiles.status, 'approved'),
+        sql`NOT EXISTS (SELECT 1 FROM ${payoutItems} pi WHERE pi.ledger_entry_id = ${sellerLedgerEntries.id} AND pi.released_at IS NULL)`,
+      ),
+    )
+    .orderBy(sellerLedgerEntries.sellerId)
+    .limit(limit + 1);
+  const run: ScheduledPayoutRun = { created: [], skipped: [], failed: [], more: rows.length > limit };
+  for (const { sellerId } of rows.slice(0, limit)) {
+    try {
+      const r = await createPayout(db, sellerId, { createdBy: opts.systemActorId });
+      if (r.created) run.created.push({ sellerId, payoutId: r.payoutId, amountCents: r.amountCents });
+      else run.skipped.push({ sellerId, reason: r.reason });
+    } catch (e) {
+      if (e instanceof NoPayoutAccountError) run.skipped.push({ sellerId, reason: 'no_payout_account' });
+      else run.failed.push({ sellerId, error: e instanceof Error ? e.message : String(e) });
+    }
+  }
+  return run;
+}
+
 type Status = typeof payouts.$inferSelect.status;
 
 /** Guarded transition. Returns whether THIS call made it; throws if the payout is in some other state. */
@@ -101,7 +145,9 @@ export async function startPayout(db: Db, payoutId: string, actorId?: string | n
     if (!p) throw new PayoutNotFoundError(payoutId);
     if (p.amountCents >= opts.dualControlThresholdCents) {
       if (!actorId) throw new SeparationOfDutiesError('the person starting a payout of this size must be identified');
-      if (p.createdBy && p.createdBy === actorId) {
+      // A payout with no recorded creator cannot prove the two-person rule, so it is refused too.
+      if (!p.createdBy) throw new SeparationOfDutiesError('the creator of a payout of this size must be identified', { payoutId });
+      if (p.createdBy === actorId) {
         throw new SeparationOfDutiesError('a payout of this size must be started by someone other than the person who created it', { payoutId });
       }
     }

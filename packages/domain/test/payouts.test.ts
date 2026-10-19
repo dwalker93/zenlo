@@ -1,8 +1,11 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
-import { eq } from 'drizzle-orm';
-import { auditLogs, payoutItems, payouts, sellerLedgerEntries, sellerOrders } from '@workspace/db/schema';
+import { eq, inArray } from 'drizzle-orm';
+import { auditLogs, payoutItems, payouts, sellerLedgerEntries, sellerOrders, sellerProfiles, userRoles, users } from '@workspace/db/schema';
 import {
   NoPayoutAccountError,
+  SeparationOfDutiesError,
+  ensureSystemActor,
+  runScheduledPayouts,
   PayoutOutcomeUnknownError,
   PayoutStateError,
   cancelPayout,
@@ -253,5 +256,59 @@ describe('payout lifecycle', () => {
       expect(await live(p.payoutId)).toHaveLength(2);
     }
     await clean();
+  });
+});
+
+describe('scheduled payout run', () => {
+  test('creates one pending payout per approved seller, acting as the system actor; people still start the transfer', async () => {
+    const sys = await ensureSystemActor(pg.db);
+    expect(await ensureSystemActor(pg.db)).toBe(sys); // idempotent
+    const a = await sellerWithDeliveries(2);
+    const b = await sellerWithDeliveries(1);
+    const noAccount = await sellerWithDeliveries(1, { account: false });
+    const suspended = await sellerWithDeliveries(1);
+    await pg.db.update(sellerProfiles).set({ status: 'approved' }).where(inArray(sellerProfiles.id, [a.sellerId, b.sellerId, noAccount.sellerId]));
+    await pg.db.update(sellerProfiles).set({ status: 'suspended' }).where(eq(sellerProfiles.id, suspended.sellerId));
+
+    const run = await runScheduledPayouts(pg.db, { systemActorId: sys });
+    expect(run.failed).toEqual([]);
+    const made = (id: string) => run.created.find((c) => c.sellerId === id);
+    expect(made(a.sellerId)?.amountCents).toBe(540000); // 2 x 270000, one payout
+    expect(made(b.sellerId)?.amountCents).toBe(270000);
+    expect(run.skipped).toContainEqual({ sellerId: noAccount.sellerId, reason: 'no_payout_account' });
+    expect(made(suspended.sellerId)).toBeUndefined();
+    expect(run.skipped.find((s) => s.sellerId === suspended.sellerId)).toBeUndefined();
+
+    const [p] = await pg.db.select().from(payouts).where(eq(payouts.id, made(a.sellerId)!.payoutId));
+    expect(p.status).toBe('pending');
+    expect(p.createdBy).toBe(sys);
+    const audits = await pg.db.select().from(auditLogs).where(eq(auditLogs.entityId, p.id));
+    expect(audits[0].actorId).toBe(sys);
+
+    // a second run finds everything claimed; nothing is paid twice
+    const again = await runScheduledPayouts(pg.db, { systemActorId: sys });
+    expect(again.created.find((c) => c.sellerId === a.sellerId || c.sellerId === b.sellerId)).toBeUndefined();
+
+    // the system actor cannot be the starter of a payout it created, and a person can start it
+    await expect(startPayout(pg.db, p.id, sys, { dualControlThresholdCents: 0 })).rejects.toBeInstanceOf(SeparationOfDutiesError);
+    const person = await pg.db.insert(users).values({ email: `fin-${Date.now()}@x.lk`, name: 'Fin' }).returning({ id: users.id });
+    await startPayout(pg.db, p.id, person[0].id, { dualControlThresholdCents: 0 });
+  });
+
+  test('the system actor cannot sign in or hold a role', async () => {
+    const sys = await ensureSystemActor(pg.db);
+    const [u] = await pg.db.select().from(users).where(eq(users.id, sys));
+    expect(u.isActive).toBe(false);
+    expect(await pg.db.select().from(userRoles).where(eq(userRoles.userId, sys))).toEqual([]);
+  });
+
+  test('respects the limit and reports that more are waiting', async () => {
+    const sys = await ensureSystemActor(pg.db);
+    const x = await sellerWithDeliveries(1);
+    const y = await sellerWithDeliveries(1);
+    await pg.db.update(sellerProfiles).set({ status: 'approved' }).where(inArray(sellerProfiles.id, [x.sellerId, y.sellerId]));
+    const run = await runScheduledPayouts(pg.db, { systemActorId: sys, limit: 1 });
+    expect(run.created.length + run.skipped.length + run.failed.length).toBe(1);
+    expect(run.more).toBe(true);
   });
 });
