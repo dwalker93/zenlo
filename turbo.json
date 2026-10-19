@@ -1,24 +1,30 @@
 {
   "$schema": "https://turbo.build/schema.json",
   "ui": "tui",
+  "globalPassThroughEnv": [
+    "DATABASE_URL",
+    "PAYHERE_MERCHANT_ID",
+    "PAYHERE_MERCHANT_SECRET",
+    "PAYHERE_SANDBOX",
+    "PUBLIC_BASE_URL",
+    "COURIER_WEBHOOK_SECRET",
+    "CRON_SECRET",
+    "AUTO_VERIFY_DELIVERY",
+    "REQUIRE_MFA",
+    "DUAL_CONTROL_THRESHOLD_CENTS"
+  ],
   "tasks": {
     "build": {
       "dependsOn": ["^build"],
       "inputs": ["$TURBO_DEFAULT$", ".env*"],
       "outputs": [".next/**", "!.next/cache/**", "!.next/dev/**"]
     },
-    "lint": {
-      "dependsOn": ["^lint"]
-    },
-    "format": {
-      "dependsOn": ["^format"]
-    },
-    "typecheck": {
-      "dependsOn": ["^typecheck"]
-    },
-    "dev": {
-      "cache": false,
-      "persistent": true
-    }
+    "lint": {},
+    "typecheck": {},
+    "format": { "cache": false },
+    "test": { "cache": false, "env": ["DATABASE_URL_TEST"] },
+    "db:generate": { "cache": false },
+    "db:migrate": { "cache": false },
+    "dev": { "cache": false, "persistent": true }
   }
 }
