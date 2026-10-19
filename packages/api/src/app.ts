@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import type { Authenticate, Env } from './auth';
-import type { ApiConfig } from './config';
+import type { AdminConfig, ApiConfig, PublicConfig } from './config';
 import type { Db } from '@workspace/domain';
 import type { CourierAdapter } from './courier';
 import { createAdminApp } from './admin';
@@ -22,8 +22,11 @@ export interface AppDeps {
 export function createApp(deps: AppDeps) {
   const { db, authenticate, config, courier } = deps;
   const app = new Hono<Env>();
-  app.route('/admin', createAdminApp({ db, authenticate, config }));
+  // Each app gets ITS OWN origin list: the admin origin must not pass the public guard, nor the public origin the admin one.
+  const publicConfig: PublicConfig = { payhere: config.payhere, publicBaseUrl: config.publicBaseUrl, trustedOrigins: config.publicTrustedOrigins };
+  const adminConfig: AdminConfig = { requireMfa: config.requireMfa, dualControlThresholdCents: config.dualControlThresholdCents, trustedOrigins: config.adminTrustedOrigins };
+  app.route('/admin', createAdminApp({ db, authenticate, config: adminConfig }));
   app.route('/', createMachineApp({ db, config, courier }));
-  app.route('/', createPublicApp({ db, authenticate, config }));
+  app.route('/', createPublicApp({ db, authenticate, config: publicConfig }));
   return app;
 }

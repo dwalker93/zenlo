@@ -1,5 +1,3 @@
-import 'server-only'; // build-time guard: importing this package from a client component fails the Next.js build
-
 export * from './types';
 export * from './errors';
 export * from './checkout';

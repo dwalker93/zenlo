@@ -4,7 +4,10 @@
   "private": true,
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": {
+      "browser": "./src/browser-blocked.ts",
+      "default": "./src/index.ts"
+    }
   },
   "scripts": {
     "typecheck": "tsc --noEmit",

@@ -39,7 +39,7 @@ export function createAdminApp(deps: AdminAppDeps) {
   const { db, config } = deps;
   const app = new Hono<Env>();
   app.onError(onError);
-  if (config.trustedOrigins?.length) app.use('*', requireTrustedOrigin(config.trustedOrigins));
+  app.use('*', requireTrustedOrigin(config.trustedOrigins)); // throws at startup if the list is empty
   app.get('/health', (c) => c.json({ ok: true }));
   app.use('*', requireUser(deps.authenticate), requireStaff(config.requireMfa));
   const dual = { dualControlThresholdCents: config.dualControlThresholdCents };

@@ -275,7 +275,10 @@ describe('scheduled payout run', () => {
     const made = (id: string) => run.created.find((c) => c.sellerId === id);
     expect(made(a.sellerId)?.amountCents).toBe(540000); // 2 x 270000, one payout
     expect(made(b.sellerId)?.amountCents).toBe(270000);
-    expect(run.skipped).toContainEqual({ sellerId: noAccount.sellerId, reason: 'no_payout_account' });
+    // not selected at all: no payout account
+    expect(made(noAccount.sellerId)).toBeUndefined();
+    expect(run.skipped.find((s) => s.sellerId === noAccount.sellerId)).toBeUndefined();
+    expect(run.failed).toEqual([]);
     expect(made(suspended.sellerId)).toBeUndefined();
     expect(run.skipped.find((s) => s.sellerId === suspended.sellerId)).toBeUndefined();
 
@@ -310,5 +313,39 @@ describe('scheduled payout run', () => {
     const run = await runScheduledPayouts(pg.db, { systemActorId: sys, limit: 1 });
     expect(run.created.length + run.skipped.length + run.failed.length).toBe(1);
     expect(run.more).toBe(true);
+  });
+
+  test('sellers that cannot be paid never fill the batch: payable sellers are always reached', async () => {
+    const sys = await ensureSystemActor(pg.db);
+    // 4 approved sellers with unclaimed entries but no payout account, and 1 with a negative balance
+    const unpayable = [await sellerWithDeliveries(1, { account: false }), await sellerWithDeliveries(1, { account: false }), await sellerWithDeliveries(1, { account: false }), await sellerWithDeliveries(1, { account: false })];
+    const negative = await seed(pg.db, { stock: 1, sellers: 1 });
+    await addPayoutAccount(pg.db, negative.sellers[0].sellerId);
+    await pg.db.insert(sellerLedgerEntries).values({ sellerId: negative.sellers[0].sellerId, type: 'adjustment', amountCents: -500 });
+    const payable = await sellerWithDeliveries(1);
+    await pg.db.update(sellerProfiles).set({ status: 'approved' }).where(inArray(sellerProfiles.id, [...unpayable.map((u) => u.sellerId), negative.sellers[0].sellerId, payable.sellerId]));
+
+    // one seller per run: keep running while more are waiting. With unpayable sellers in the batch this would never end.
+    const created: string[] = [];
+    let more = true;
+    for (let i = 0; i < 50 && more; i++) {
+      const run = await runScheduledPayouts(pg.db, { systemActorId: sys, limit: 1 });
+      created.push(...run.created.map((c) => c.sellerId));
+      expect(run.failed).toEqual([]);
+      more = run.more;
+    }
+    expect(more).toBe(false);
+    expect(created).toContain(payable.sellerId);
+    for (const u of unpayable) expect(created).not.toContain(u.sellerId);
+    expect(created).not.toContain(negative.sellers[0].sellerId);
+  });
+
+  test('ensureSystemActor refuses to reuse an existing row that is active or holds a role', async () => {
+    const [active] = await pg.db.insert(users).values({ email: 'taken-a@system.invalid', name: 'x', isActive: true }).returning({ id: users.id });
+    await expect(ensureSystemActor(pg.db, 'taken-a')).rejects.toThrow('active');
+    const [withRole] = await pg.db.insert(users).values({ email: 'taken-b@system.invalid', name: 'x', isActive: false }).returning({ id: users.id });
+    await pg.db.insert(userRoles).values({ userId: withRole.id, role: 'admin' });
+    await expect(ensureSystemActor(pg.db, 'taken-b')).rejects.toThrow('roles');
+    expect(active.id).not.toBe(withRole.id);
   });
 });

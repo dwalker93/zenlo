@@ -3,6 +3,7 @@ import { Hono } from 'hono';
 import { payments } from '@workspace/db/schema';
 import {
   DeliveryNotVerifiableError,
+  SellerOrderStateError,
   applyCourierEvent,
   audit,
   confirmPayment,
@@ -100,7 +101,11 @@ export function createMachineApp(deps: MachineAppDeps) {
       try {
         await verifyDelivery(db, r.sellerOrderId);
       } catch (e) {
-        if (!(e instanceof DeliveryNotVerifiableError)) throw e; // other parcels still on the way: verify later
+        // Expected, not an error: other parcels are still on the way (DeliveryNotVerifiableError), or the seller has
+        // not marked the last parcel yet (partially_shipped). The event is already stored, so answer 200 and let
+        // staff or the last parcel's event verify later. Any OTHER state error is a real concurrent change: let it through.
+        const partial = e instanceof SellerOrderStateError && e.details?.actual === 'partially_shipped';
+        if (!(e instanceof DeliveryNotVerifiableError) && !partial) throw e;
       }
     }
     return c.json({ matched: r.matched, applied: r.matched ? r.applied : false });
