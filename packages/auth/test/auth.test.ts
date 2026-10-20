@@ -190,6 +190,33 @@ describe('admin auth', () => {
     expect(await admAuthn(req(ADMIN, good.cookie))).toEqual({ userId: s.userId, roles: ['admin'], mfaVerified: true });
   });
 
+  test('completing TOTP enrollment revokes every other session; only the confirming session is mfaVerified', async () => {
+    const s = await staff('finance');
+    const a = await post(adm, ADMIN, '/sign-in/email', { email: s.email, password: PW }, '', '10.0.1.1');
+    const b = await post(adm, ADMIN, '/sign-in/email', { email: s.email, password: PW }, '', '10.0.1.2'); // e.g. a stolen or forgotten session
+    expect((await admAuthn(req(ADMIN, b.cookie)))?.mfaVerified).toBe(false);
+    const enable = await post(adm, ADMIN, '/two-factor/enable', { password: PW }, a.cookie);
+    const secret = secretFromUri(enable.body.totpURI);
+    // before the code is confirmed nothing changes
+    expect(await admAuthn(req(ADMIN, b.cookie))).not.toBeNull();
+    const confirm = await post(adm, ADMIN, '/two-factor/verify-totp', { code: (await adm.api.generateTOTP({ body: { secret } })).code }, a.cookie);
+    expect(confirm.status).toBe(200);
+    expect(await admAuthn(req(ADMIN, confirm.cookie))).toEqual({ userId: s.userId, roles: ['finance'], mfaVerified: true });
+    expect(await admAuthn(req(ADMIN, b.cookie))).toBeNull(); // the other session never entered a code
+    expect(await admAuthn(req(ADMIN, a.cookie))).toBeNull(); // the pre-enrollment session of the enrolling device is replaced
+  });
+
+  test('later profile updates do not revoke sessions of an enrolled user', async () => {
+    const s = await staff('support');
+    const a = await post(adm, ADMIN, '/sign-in/email', { email: s.email, password: PW }, '', '10.0.2.1');
+    const enable = await post(adm, ADMIN, '/two-factor/enable', { password: PW }, a.cookie);
+    const secret = secretFromUri(enable.body.totpURI);
+    const confirm = await post(adm, ADMIN, '/two-factor/verify-totp', { code: (await adm.api.generateTOTP({ body: { secret } })).code }, a.cookie);
+    const upd = await post(adm, ADMIN, '/update-user', { name: 'Renamed' }, confirm.cookie);
+    expect(upd.status).toBe(200);
+    expect((await admAuthn(req(ADMIN, confirm.cookie)))?.mfaVerified).toBe(true); // still signed in
+  });
+
   test('a customer cannot get an admin session even with the right password', async () => {
     const c = await customer();
     const r = await post(adm, ADMIN, '/sign-in/email', { email: c.email, password: PW });

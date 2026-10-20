@@ -114,6 +114,26 @@ export function createAdminAuth(d: AdminAuthDeps) {
       },
     },
     databaseHooks: {
+      user: {
+        update: {
+          // Completing TOTP enrollment flips twoFactorEnabled, and `mfaVerified` is derived from it. Better Auth swaps
+          // only the session that submitted the code, so a session opened BEFORE enrollment (never asked for a code)
+          // would suddenly count as MFA-verified. Revoke every session of this user at that moment; Better Auth then
+          // creates the confirming session right after this hook, so only that one survives.
+          // The twoFactor row is still unverified here (Better Auth marks it verified after the user update), which
+          // is what tells enrollment apart from any other profile update.
+          after: async (user) => {
+            if (!user || (user as { twoFactorEnabled?: boolean }).twoFactorEnabled !== true) return;
+            const pending = await d.db
+              .select({ id: twoFactors.id })
+              .from(twoFactors)
+              .where(and(eq(twoFactors.userId, user.id), eq(twoFactors.verified, false)))
+              .limit(1);
+            if (pending.length === 0) return;
+            await d.db.delete(sessions).where(eq(sessions.userId, user.id));
+          },
+        },
+      },
       session: {
         create: {
           // Only active staff may hold an admin session, whatever else they can do on the public site.
