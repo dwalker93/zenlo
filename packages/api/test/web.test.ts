@@ -36,3 +36,33 @@ describe('createWebApp (public + machine under /api)', () => {
     expect((await post('/api/admin/payouts', { origin: 'https://shop.test' })).status).toBe(404);
   });
 });
+
+describe('lazy machine config', () => {
+  const publicConfig = { payhere: { merchantId: 'm', merchantSecret: 's', sandbox: true }, publicBaseUrl: 'https://shop.test', trustedOrigins: ['https://shop.test'] };
+  const good = { payhere: { merchantId: 'm', merchantSecret: 's' }, courierWebhookSecret: 'c', cronSecret: 'k', autoVerifyDelivery: false };
+  const cron = (a: ReturnType<typeof createWebApp>, bearer: string) => a.request('/api/cron/reconcile', { headers: { authorization: `Bearer ${bearer}` } });
+
+  test('missing machine secrets break only machine endpoints, with 503', async () => {
+    const a = createWebApp({ db, authenticate: async () => null, publicConfig, machineConfig: () => { throw new Error('missing environment variable CRON_SECRET'); } });
+    expect((await a.request('/api/health')).status).toBe(200);
+    expect((await a.request('/api/orders', { method: 'POST', headers: { origin: 'https://shop.test', 'content-type': 'application/json' }, body: '{}' })).status).toBe(401); // public route still answers
+    const r = await cron(a, 'k');
+    expect(r.status).toBe(503);
+    const body = await r.json();
+    expect(body.error.code).toBe('not_configured');
+    expect(JSON.stringify(body)).not.toContain('CRON_SECRET'); // no env var names in the response
+    const ph = await a.request('/api/webhooks/payhere', { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: 'merchant_id=x' });
+    expect(ph.status).toBe(503);
+  });
+
+  test('a failed load is not cached; a success is', async () => {
+    let calls = 0;
+    let ready = false;
+    const a = createWebApp({ db, authenticate: async () => null, publicConfig, machineConfig: () => { calls++; if (!ready) throw new Error('missing'); return good; } });
+    expect((await cron(a, 'wrong')).status).toBe(503);
+    ready = true;
+    expect((await cron(a, 'wrong')).status).toBe(401); // loaded now: the bearer check runs
+    expect((await cron(a, 'wrong')).status).toBe(401);
+    expect(calls).toBe(2); // one failure + one success; the success is cached
+  });
+});

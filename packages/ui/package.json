@@ -23,14 +23,14 @@
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
     "@turbo/gen": "^2.11.7",
-    "@types/node": "^20",
+    "@types/node": "^26.6.5",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "@workspace/eslint-config": "workspace:*",
     "@workspace/typescript-config": "workspace:*",
     "eslint": "^10",
     "tailwindcss": "^4",
-    "typescript": "^5"
+    "typescript": "^7.0.2"
   },
   "exports": {
     "./globals.css": "./src/styles/globals.css",

@@ -5,6 +5,7 @@
     "PAYHERE_MERCHANT_ID",
     "PAYHERE_SANDBOX",
     "PUBLIC_BASE_URL",
+    "SYSTEM_ACTOR_ID",
     "AUTO_VERIFY_DELIVERY",
     "REQUIRE_MFA",
     "DUAL_CONTROL_THRESHOLD_CENTS"
@@ -16,6 +17,7 @@
       "outputs": [".next/**", "!.next/cache/**", "!.next/dev/**"],
       "passThroughEnv": [
         "DATABASE_URL",
+        "PUBLIC_AUTH_SECRET",
         "PAYHERE_MERCHANT_SECRET",
         "COURIER_WEBHOOK_SECRET",
         "CRON_SECRET"
@@ -32,6 +34,7 @@
       "persistent": true,
       "passThroughEnv": [
         "DATABASE_URL",
+        "PUBLIC_AUTH_SECRET",
         "PAYHERE_MERCHANT_SECRET",
         "COURIER_WEBHOOK_SECRET",
         "CRON_SECRET"

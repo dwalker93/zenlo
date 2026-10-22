@@ -48,8 +48,10 @@ describe('server-only boundary', () => {
         const entry = join(dir, 'entry.ts');
         writeFileSync(entry, `import * as m from '${g.specifier}'; console.log(m);\n`);
         const browser = spawnSync('bun', ['build', entry, '--target=browser'], { cwd: dir });
+        expect(browser.status).toBe(0);
         expect(browser.stdout.toString()).toContain('Client Component'); // server-only's throw is bundled in
         const server = spawnSync('bun', ['build', entry, '--target=bun'], { cwd: dir });
+        expect(server.status).toBe(0); // an empty stdout from a failed build must not pass
         expect(server.stdout.toString()).not.toContain('Client Component');
         checked++;
       } finally {

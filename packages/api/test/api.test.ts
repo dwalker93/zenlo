@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { createHash } from 'node:crypto';
-import { desc, eq } from 'drizzle-orm';
+import { and, desc, eq } from 'drizzle-orm';
 import { auditLogs, inventory, orders, payments, refunds, payouts, sellerLedgerEntries, sellerOrders, sellerProfiles, shipments, users } from '@workspace/db/schema';
 import { cancelUnpaidOrder, ensureSystemActor, placeOrder } from '@workspace/domain';
 import { createApp, signCourierBody, type ApiConfig, type Principal } from '../src';
@@ -374,10 +374,25 @@ describe('scheduled payout run (cron)', () => {
     const [p] = await pg.db.select().from(payouts).where(eq(payouts.id, made.payoutId));
     expect(p.status).toBe('pending');
     expect(p.createdBy).toBe(sys);
+    const beats = await pg.db.select().from(auditLogs).where(and(eq(auditLogs.entityType, 'system_job'), eq(auditLogs.action, 'payout_run.completed')));
+    expect(beats.length).toBeGreaterThanOrEqual(1); // the run left a heartbeat for monitoring
+    expect((beats.at(-1)!.metadata as any).failed).toEqual([]);
 
     // a finance person (not the system actor) starts it; the two-person rule is satisfied
     const start = await call('POST', `/admin/payouts/${made.payoutId}/start`, { as: adminP });
     expect(start.status).toBe(200);
+  });
+
+  test('payout-run writes a payout_run.failed row when the run itself throws', async () => {
+    const sys = await ensureSystemActor(pg.db);
+    const boom = new Set(['select', 'transaction', 'execute']);
+    const flaky = new Proxy(pg.db, { get: (t, p, r) => (boom.has(p as string) ? () => { throw new Error('boom'); } : Reflect.get(t, p, r)) }) as typeof pg.db;
+    const flakyApp = createApp({ db: flaky, authenticate, config: { ...config, systemActorId: sys } });
+    const res = await call('GET', '/cron/payout-run', { headers: { authorization: `Bearer ${config.cronSecret}` }, a: flakyApp });
+    expect(res.status).toBe(500);
+    const rows = await pg.db.select().from(auditLogs).where(and(eq(auditLogs.entityType, 'system_job'), eq(auditLogs.action, 'payout_run.failed')));
+    expect(rows.length).toBeGreaterThanOrEqual(1);
+    expect(String((rows.at(-1)!.metadata as any).error)).toContain('boom');
   });
 });
 

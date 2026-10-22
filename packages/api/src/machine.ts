@@ -17,27 +17,44 @@ import {
 } from '@workspace/domain';
 import type { Env } from './auth';
 import { hmacJsonAdapter, type CourierAdapter } from './courier';
-import type { MachineConfig } from './config';
+import type { MachineConfig, MachineConfigSource } from './config';
 import { HttpError, onError } from './http';
 import { parseAmountToCents, verifyNotifySignature, type NotifyFields } from './payhere';
 import { bearerMatches, uuid } from './shared';
 
 export interface MachineAppDeps {
   db: Db;
-  config: MachineConfig;
+  /**
+   * The config, or a function that loads it (pass `loadMachineConfig`, not `loadMachineConfig()`). A function runs on the
+   * first machine request and again on each later one until it succeeds; only a success is cached, so a missing secret
+   * answers 503 on machine routes only, and fixing the env var recovers without a restart.
+   */
+  config: MachineConfigSource;
   courier?: CourierAdapter;
 }
 
 /** Webhooks (PayHere, courier) and cron. Authenticated by signatures / bearer secrets; there are no user sessions here. */
 export function createMachineApp(deps: MachineAppDeps) {
-  const { db, config } = deps;
-  const courier = deps.courier ?? hmacJsonAdapter(config.courierWebhookSecret);
+  const { db } = deps;
+  let loaded: MachineConfig | undefined;
+  const getConfig = (): MachineConfig => {
+    if (loaded) return loaded;
+    try {
+      return (loaded = typeof deps.config === 'function' ? deps.config() : deps.config);
+    } catch (e) {
+      console.error('machine config unavailable', e); // the variable name stays in the log, not in the response
+      throw new HttpError(503, 'not_configured', 'Machine endpoints are not configured');
+    }
+  };
+  let defaultCourier: CourierAdapter | undefined;
+  const getCourier = (config: MachineConfig) => deps.courier ?? (defaultCourier ??= hmacJsonAdapter(config.courierWebhookSecret));
   const app = new Hono<Env>();
   app.onError(onError);
-  app.get('/health', (c) => c.json({ ok: true }));
+  app.get('/health', (c) => c.json({ ok: true })); // needs no config
 
   // ---------- PayHere notification ----------
   app.post('/webhooks/payhere', async (c) => {
+    const config = getConfig();
     const form = await c.req.parseBody();
     const str = (k: string) => (typeof form[k] === 'string' ? (form[k] as string) : '');
     const f: NotifyFields = {
@@ -95,7 +112,8 @@ export function createMachineApp(deps: MachineAppDeps) {
 
   // ---------- courier webhook ----------
   app.post('/webhooks/courier', async (c) => {
-    const ev = courier.parse(await c.req.text(), c.req.raw.headers);
+    const config = getConfig();
+    const ev = getCourier(config).parse(await c.req.text(), c.req.raw.headers);
     const r = await applyCourierEvent(db, ev);
     if (r.matched && r.applied && ev.status === 'delivered' && config.autoVerifyDelivery) {
       try {
@@ -114,6 +132,7 @@ export function createMachineApp(deps: MachineAppDeps) {
   // ---------- scheduled jobs (Vercel Cron sends GET with Authorization: Bearer $CRON_SECRET) ----------
   const cron = new Hono<Env>();
   cron.use('*', async (c, next) => {
+    const config = getConfig();
     if (!bearerMatches(c.req.header('authorization'), config.cronSecret)) throw new HttpError(401, 'unauthenticated', 'Invalid cron secret');
     await next();
   });
@@ -125,9 +144,26 @@ export function createMachineApp(deps: MachineAppDeps) {
   });
   // Creates PENDING payouts only (createdBy = the system actor); a person with payouts.manage still starts each transfer.
   cron.get('/payout-run', async (c) => {
-    if (!config.systemActorId) throw new HttpError(503, 'not_configured', 'SYSTEM_ACTOR_ID is not set; no payouts were created');
-    const run = await runScheduledPayouts(db, { systemActorId: config.systemActorId });
+    const config = getConfig();
+    const systemActorId = config.systemActorId;
+    if (!systemActorId) throw new HttpError(503, 'not_configured', 'SYSTEM_ACTOR_ID is not set; no payouts were created');
+    // One audit row per run, whatever happens: the heartbeat a monitor watches (see the README, "Scheduled payouts").
+    // A failed audit write is logged and never hides the run's own outcome; a missing row trips the "no completed run" alert.
+    const beat = (action: 'payout_run.completed' | 'payout_run.failed', metadata: Record<string, unknown>) =>
+      audit(db, { actorId: systemActorId, action, entityType: 'system_job', entityId: systemActorId, metadata }).catch((e) =>
+        console.error('could not write payout run audit row', e),
+      );
+    let run: Awaited<ReturnType<typeof runScheduledPayouts>>;
+    try {
+      run = await runScheduledPayouts(db, { systemActorId });
+    } catch (e) {
+      await beat('payout_run.failed', { error: (e instanceof Error ? e.message : String(e)).slice(0, 500) });
+      throw e; // still a 500 through onError, so cron alerting fires too
+    }
     if (run.failed.length > 0) console.error('payout run failures', run.failed);
+    await beat(run.failed.length === 0 ? 'payout_run.completed' : 'payout_run.failed', {
+      created: run.created.length, skipped: run.skipped.length, failed: run.failed, more: run.more,
+    });
     return c.json({ ok: run.failed.length === 0, ...run }, run.failed.length === 0 ? 200 : 500); // non-2xx so cron alerting fires
   });
   app.route('/cron', cron);

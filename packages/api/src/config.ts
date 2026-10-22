@@ -33,6 +33,8 @@ export interface MachineConfig {
   /** Verify delivery automatically when the courier reports every parcel delivered (else staff do it). */
   autoVerifyDelivery: boolean;
 }
+/** A config object, or a function that loads it. A function is called per request until it succeeds (see createMachineApp). */
+export type MachineConfigSource = MachineConfig | (() => MachineConfig);
 /**
  * Everything, for the combined dev/test app. The two CSRF origin lists are kept apart (a spread would let one overwrite
  * the other): createApp hands `publicTrustedOrigins` to the public app and `adminTrustedOrigins` to the admin app.

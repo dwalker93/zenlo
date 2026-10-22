@@ -27,8 +27,9 @@ export const getAuth = () =>
   (auth ??= createPublicAuth({ db, secret: process.env.PUBLIC_AUTH_SECRET!, baseURL: process.env.PUBLIC_BASE_URL! }));
 
 export const getApi = () =>
-  (api ??= createWebApp({ db, authenticate: publicAuthenticate(getAuth(), db), publicConfig: loadPublicConfig(), machineConfig: loadMachineConfig() }));
+  (api ??= createWebApp({ db, authenticate: publicAuthenticate(getAuth(), db), publicConfig: loadPublicConfig(), machineConfig: loadMachineConfig }));
 ```
+Pass `loadMachineConfig` itself, not its result. It runs on the first machine request and is retried until it succeeds, so a missing `CRON_SECRET`, `COURIER_WEBHOOK_SECRET` or PayHere secret makes only `/api/webhooks/*` and `/api/cron/*` answer `503 not_configured`; customer and seller routes and `/api/health` are unaffected.
 ```ts
 // apps/web/app/api/[[...route]]/route.ts   (orders, seller, webhooks, cron)
 import { getApi } from '@/lib/server';
@@ -119,7 +120,14 @@ The public and admin apps authenticate with cookies, so state-changing requests 
      { "path": "/api/cron/payout-run", "schedule": "0 3 * * *" }
    ] }
    ```
-   Vercel sends `Authorization: Bearer $CRON_SECRET`; the route answers 401 without it and 500 if any seller errored, so cron alerting fires.
+   The route answers 401 without that header and 500 if any seller errored or the run threw, but **do not rely on that status to notify anyone**: Vercel does not retry a failed cron invocation, and its error alerts need an eligible plan plus Observability, so a single failed daily run may never alert.
+   Monitor the run itself instead. Every run writes one `audit_logs` row (`entity_type = 'system_job'`, `action = 'payout_run.completed'` or `'payout_run.failed'`). A normal run records `created`/`skipped`/`failed`/`more` in `metadata`; a run that throws records `error`. Alert on either of: no `payout_run.completed` row in the last cadence + slack (e.g. 26 h for a daily run), which also catches a run that never started or returned 401/503; or any `payout_run.failed` row.
+   ```sql
+   SELECT max(created_at) FILTER (WHERE action = 'payout_run.completed') AS last_ok,
+          count(*) FILTER (WHERE action = 'payout_run.failed' AND created_at > now() - interval '2 days') AS failures_48h
+   FROM audit_logs WHERE entity_type = 'system_job';
+   ```
+   Run that from any scheduler or uptime monitor you already have (or show it in the admin app) and page when `last_ok` is stale or `failures_48h > 0`.
 4. Staff then see the pending payouts in the admin app and start them (`POST /admin/payouts/:id/start`).
 
 ## Tests
