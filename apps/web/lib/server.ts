@@ -21,5 +21,5 @@ export const getApi = () =>
     db,
     authenticate: publicAuthenticate(getAuth(), db),
     publicConfig: loadPublicConfig(),
-    machineConfig: loadMachineConfig(),
+    machineConfig: loadMachineConfig, // lazy: a missing CRON_SECRET only breaks machine routes
   }))

@@ -206,6 +206,34 @@ describe('admin auth', () => {
     expect(await admAuthn(req(ADMIN, a.cookie))).toBeNull(); // the pre-enrollment session of the enrolling device is replaced
   });
 
+  test('if the confirming session cannot be created, enrollment revokes nothing (no lockout)', async () => {
+    const s = await staff('finance');
+    const a = await post(adm, ADMIN, '/sign-in/email', { email: s.email, password: PW }, '', '10.0.3.1');
+    await post(adm, ADMIN, '/sign-in/email', { email: s.email, password: PW }, '', '10.0.3.2');
+    const enable = await post(adm, ADMIN, '/two-factor/enable', { password: PW }, a.cookie);
+    const secret = secretFromUri(enable.body.totpURI);
+    const before = await pg.db.select({ id: sessions.id }).from(sessions).where(eq(sessions.userId, s.userId));
+    expect(before.length).toBe(2);
+    // The staff member is deactivated before the code is confirmed: the admin session.create hook refuses the confirming session.
+    await pg.db.update(users).set({ isActive: false }).where(eq(users.id, s.userId)); // not deactivateUser(): that deletes the sessions itself
+    const confirm = await post(adm, ADMIN, '/two-factor/verify-totp', { code: (await adm.api.generateTOTP({ body: { secret } })).code }, a.cookie);
+    expect(confirm.status).toBeGreaterThanOrEqual(400);
+    // Nothing was revoked by the enrollment hook: both pre-existing session rows are still there.
+    const after = await pg.db.select({ id: sessions.id }).from(sessions).where(eq(sessions.userId, s.userId));
+    expect(after.map((r) => r.id).sort()).toEqual(before.map((r) => r.id).sort());
+  });
+
+  test('a refused code does not revoke anything', async () => {
+    const s = await staff('support');
+    const a = await post(adm, ADMIN, '/sign-in/email', { email: s.email, password: PW }, '', '10.0.4.1');
+    const b = await post(adm, ADMIN, '/sign-in/email', { email: s.email, password: PW }, '', '10.0.4.2');
+    await post(adm, ADMIN, '/two-factor/enable', { password: PW }, a.cookie);
+    const bad = await post(adm, ADMIN, '/two-factor/verify-totp', { code: '000000' }, a.cookie);
+    expect(bad.status).toBeGreaterThanOrEqual(400);
+    expect(await admAuthn(req(ADMIN, a.cookie))).not.toBeNull();
+    expect(await admAuthn(req(ADMIN, b.cookie))).not.toBeNull();
+  });
+
   test('later profile updates do not revoke sessions of an enrolled user', async () => {
     const s = await staff('support');
     const a = await post(adm, ADMIN, '/sign-in/email', { email: s.email, password: PW }, '', '10.0.2.1');

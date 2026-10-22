@@ -1,8 +1,8 @@
 import { betterAuth } from 'better-auth';
 import { drizzleAdapter } from 'better-auth/adapters/drizzle';
-import { APIError } from 'better-auth/api';
+import { APIError, createAuthMiddleware, getSessionFromCtx } from 'better-auth/api';
 import { twoFactor } from 'better-auth/plugins';
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, eq, inArray, ne } from 'drizzle-orm';
 import { accounts, rateLimits, sessions, twoFactors, userRoles, users, verifications } from '@workspace/db/schema';
 import type { Db } from '@workspace/domain';
 import { STAFF_ROLES } from '@workspace/api/permissions';
@@ -51,6 +51,66 @@ function base(d: AuthDeps, cookiePrefix: string) {
     },
     // Counters live in Postgres so limits hold across serverless instances (in-memory limits do not).
     rateLimit: { enabled: !d.disableRateLimit, storage: 'database' as const, window: 60, max: 120 },
+  };
+}
+
+
+const VERIFY_TOTP = '/two-factor/verify-totp';
+type EnrollmentMarker = { mfaEnrollment?: { userId: string } };
+
+/**
+ * Completing TOTP enrollment makes `mfaVerified` true (it is derived from twoFactorEnabled). Better Auth swaps only the
+ * session that submitted the code, so a session opened BEFORE enrollment (never asked for a code) would suddenly count
+ * as MFA-verified. Those sessions must go, but only once it is safe: in 1.7.10 the verify endpoint (1) sets
+ * twoFactorEnabled, (2) creates the confirming session, (3) deletes the submitting session, (4) marks the twoFactors row
+ * verified. Revoking inside a database hook (during step 1) would delete every session BEFORE the confirming one exists,
+ * and if step 2 then fails (for example the staff member was just deactivated) the user is locked out. So this runs as
+ * an after-hook on the endpoint: only when it succeeded, the confirming session exists and the twoFactors row is
+ * verified, it deletes every other session of that user. If anything failed, nothing is revoked.
+ * The before-hook marks the request as an enrollment (an active session submitting a code for a not-yet-verified
+ * factor); a normal sign-in code check has no active session and is never touched, nor is any profile update.
+ */
+function revokeOtherSessionsOnEnrollment(db: Db) {
+  return {
+    id: 'revoke-other-sessions-on-mfa-enrollment',
+    hooks: {
+      before: [
+        {
+          matcher: (ctx: { path?: string }) => ctx.path === VERIFY_TOTP,
+          handler: createAuthMiddleware(async (ctx) => {
+            const active = await getSessionFromCtx(ctx).catch(() => null);
+            if (!active?.session) return;
+            const pending = await db
+              .select({ id: twoFactors.id })
+              .from(twoFactors)
+              .where(and(eq(twoFactors.userId, active.user.id), eq(twoFactors.verified, false)))
+              .limit(1);
+            if (pending.length === 0) return;
+            return { context: { mfaEnrollment: { userId: active.user.id } } satisfies EnrollmentMarker };
+          }),
+        },
+      ],
+      after: [
+        {
+          matcher: (ctx: { path?: string }) => ctx.path === VERIFY_TOTP,
+          handler: createAuthMiddleware(async (ctx) => {
+            const marker = (ctx as unknown as EnrollmentMarker).mfaEnrollment;
+            if (!marker) return;
+            const returned = ctx.context.returned;
+            if (returned instanceof Error || (returned as { error?: unknown } | undefined)?.error) return; // the code was refused or the endpoint failed
+            const confirming = ctx.context.newSession?.session;
+            if (!confirming || confirming.userId !== marker.userId) return; // no confirming session: revoke nothing
+            const verified = await db
+              .select({ id: twoFactors.id })
+              .from(twoFactors)
+              .where(and(eq(twoFactors.userId, marker.userId), eq(twoFactors.verified, true)))
+              .limit(1);
+            if (verified.length === 0) return;
+            await db.delete(sessions).where(and(eq(sessions.userId, marker.userId), ne(sessions.id, confirming.id)));
+          }),
+        },
+      ],
+    },
   };
 }
 
@@ -104,7 +164,7 @@ export function createAdminAuth(d: AdminAuthDeps) {
     appName: 'Zenlo Admin',
     emailAndPassword: { enabled: true, disableSignUp: true, autoSignIn: false, minPasswordLength: 12, maxPasswordLength: 128 },
     session: { expiresIn: 60 * 60 * 8, updateAge: 60 * 15 },
-    plugins: [twoFactor({ issuer: d.issuer ?? 'Zenlo Admin' })], // no trusted devices: staff re-verify on every sign-in
+    plugins: [twoFactor({ issuer: d.issuer ?? 'Zenlo Admin' }), revokeOtherSessionsOnEnrollment(d.db)], // no trusted devices: staff re-verify on every sign-in
     rateLimit: {
       ...b.rateLimit,
       customRules: {
@@ -114,26 +174,6 @@ export function createAdminAuth(d: AdminAuthDeps) {
       },
     },
     databaseHooks: {
-      user: {
-        update: {
-          // Completing TOTP enrollment flips twoFactorEnabled, and `mfaVerified` is derived from it. Better Auth swaps
-          // only the session that submitted the code, so a session opened BEFORE enrollment (never asked for a code)
-          // would suddenly count as MFA-verified. Revoke every session of this user at that moment; Better Auth then
-          // creates the confirming session right after this hook, so only that one survives.
-          // The twoFactor row is still unverified here (Better Auth marks it verified after the user update), which
-          // is what tells enrollment apart from any other profile update.
-          after: async (user) => {
-            if (!user || (user as { twoFactorEnabled?: boolean }).twoFactorEnabled !== true) return;
-            const pending = await d.db
-              .select({ id: twoFactors.id })
-              .from(twoFactors)
-              .where(and(eq(twoFactors.userId, user.id), eq(twoFactors.verified, false)))
-              .limit(1);
-            if (pending.length === 0) return;
-            await d.db.delete(sessions).where(eq(sessions.userId, user.id));
-          },
-        },
-      },
       session: {
         create: {
           // Only active staff may hold an admin session, whatever else they can do on the public site.

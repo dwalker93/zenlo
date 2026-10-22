@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import type { Db } from '@workspace/domain';
 import type { Authenticate, Env } from './auth';
-import type { MachineConfig, PublicConfig } from './config';
+import type { MachineConfigSource, PublicConfig } from './config';
 import type { CourierAdapter } from './courier';
 import { onError } from './http';
 import { createMachineApp } from './machine';
@@ -11,7 +11,8 @@ export interface WebAppDeps {
   db: Db;
   authenticate: Authenticate;
   publicConfig: PublicConfig;
-  machineConfig: MachineConfig;
+  /** Pass `loadMachineConfig` itself (lazy): missing machine secrets then only break machine routes. */
+  machineConfig: MachineConfigSource;
   courier?: CourierAdapter;
   /** Where the Next.js catch-all route lives. Default '/api'. */
   basePath?: string;
