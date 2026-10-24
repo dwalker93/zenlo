@@ -24,20 +24,30 @@ function Enroll() {
     e.preventDefault()
     setBusy(true)
     setError('')
-    const { data, error } = await authClient.twoFactor.enable({ password })
-    setBusy(false)
-    if (error || !data || data.method !== 'totp') return setError('Could not start setup. Check your password.')
-    setSetup({ uri: data.totpURI, secret: new URL(data.totpURI).searchParams.get('secret') ?? '', backupCodes: data.backupCodes })
+    try {
+      const { data, error } = await authClient.twoFactor.enable({ password })
+      if (error || !data || data.method !== 'totp') return setError('Could not start setup. Check your password.')
+      setSetup({ uri: data.totpURI, secret: new URL(data.totpURI).searchParams.get('secret') ?? '', backupCodes: data.backupCodes })
+    } catch {
+      setError('Could not reach the server. Try again.')
+    } finally {
+      setBusy(false)
+    }
   }
 
   async function confirm(e: React.FormEvent) {
     e.preventDefault()
     setBusy(true)
     setError('')
-    const { error } = await authClient.twoFactor.verifyTotp({ code })
-    setBusy(false)
-    if (error) return setError(error.status === 429 ? 'Too many attempts. Wait a few minutes and try again.' : 'That code was not accepted.')
-    window.location.assign('/') // other sessions of this account were just revoked; this one continues
+    try {
+      const { error } = await authClient.twoFactor.verifyTotp({ code })
+      if (error) return setError(error.status === 429 ? 'Too many attempts. Wait a few minutes and try again.' : 'That code was not accepted.')
+      window.location.assign('/') // other sessions of this account were just revoked; this one continues
+    } catch {
+      setError('Could not reach the server. Try again.')
+    } finally {
+      setBusy(false)
+    }
   }
 
   return (
