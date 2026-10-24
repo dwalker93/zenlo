@@ -5,6 +5,7 @@
     "PAYHERE_MERCHANT_ID",
     "PAYHERE_SANDBOX",
     "PUBLIC_BASE_URL",
+    "ADMIN_BASE_URL",
     "SYSTEM_ACTOR_ID",
     "AUTO_VERIFY_DELIVERY",
     "REQUIRE_MFA",
@@ -14,10 +15,11 @@
     "build": {
       "dependsOn": ["^build"],
       "inputs": ["$TURBO_DEFAULT$", ".env*"],
-      "outputs": [".next/**", "!.next/cache/**", "!.next/dev/**"],
+      "outputs": [".next/**", "!.next/cache/**", "!.next/dev/**", "dist/**"],
       "passThroughEnv": [
         "DATABASE_URL",
         "PUBLIC_AUTH_SECRET",
+        "ADMIN_AUTH_SECRET",
         "PAYHERE_MERCHANT_SECRET",
         "COURIER_WEBHOOK_SECRET",
         "CRON_SECRET"
@@ -35,6 +37,7 @@
       "passThroughEnv": [
         "DATABASE_URL",
         "PUBLIC_AUTH_SECRET",
+        "ADMIN_AUTH_SECRET",
         "PAYHERE_MERCHANT_SECRET",
         "COURIER_WEBHOOK_SECRET",
         "CRON_SECRET"
