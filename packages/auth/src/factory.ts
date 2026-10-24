@@ -1,4 +1,4 @@
-import { betterAuth } from 'better-auth';
+import { betterAuth, type BetterAuthPlugin } from 'better-auth';
 import { drizzleAdapter } from 'better-auth/adapters/drizzle';
 import { APIError, createAuthMiddleware, getSessionFromCtx } from 'better-auth/api';
 import { twoFactor } from 'better-auth/plugins';
@@ -32,6 +32,11 @@ export interface PublicAuthDeps extends AuthDeps {
 export interface AdminAuthDeps extends AuthDeps {
   /** Shown in authenticator apps. */
   issuer?: string;
+  /**
+   * Framework integration plugins, appended AFTER the built-in ones (a cookie plugin such as tanstackStartCookies() must be
+   * last). Meant for plugins that add no endpoints: they are not reflected in the AdminAuth type.
+   */
+  extraPlugins?: BetterAuthPlugin[];
 }
 
 const schema = { user: users, session: sessions, account: accounts, verification: verifications, twoFactor: twoFactors, rateLimit: rateLimits };
@@ -54,6 +59,9 @@ function base(d: AuthDeps, cookiePrefix: string) {
   };
 }
 
+
+/** Staff sessions last at most this long on the server, whatever the cookie says. */
+const ADMIN_SESSION_SECONDS = 60 * 60 * 8;
 
 const VERIFY_TOTP = '/two-factor/verify-totp';
 type EnrollmentMarker = { mfaEnrollment?: { userId: string } };
@@ -114,6 +122,26 @@ function revokeOtherSessionsOnEnrollment(db: Db) {
   };
 }
 
+/**
+ * Admin sessions live in a browser-session cookie only (no Max-Age/Expires), so closing the browser drops them. The client
+ * may send `rememberMe`, but it is ignored here: a forgotten flag or a tampered request cannot make a staff session persistent.
+ * Better Auth remembers the choice in the signed `dont_remember` cookie, so the later steps that create the session (the
+ * two-factor code check, the enrollment confirmation) inherit it and need no hook of their own.
+ */
+function sessionCookieOnly() {
+  return {
+    id: 'admin-session-cookie-only',
+    hooks: {
+      before: [
+        {
+          matcher: (ctx: { path?: string }) => ctx.path === '/sign-in/email',
+          handler: createAuthMiddleware(async (ctx) => ({ context: { body: { ...(ctx.body as Record<string, unknown>), rememberMe: false } } })),
+        },
+      ],
+    },
+  };
+}
+
 /** Customers and sellers. Anyone can sign up; they get the customer role and nothing else. */
 export function createPublicAuth(d: PublicAuthDeps) {
   const b = base(d, 'zenlo');
@@ -163,8 +191,8 @@ export function createAdminAuth(d: AdminAuthDeps) {
     ...b,
     appName: 'Zenlo Admin',
     emailAndPassword: { enabled: true, disableSignUp: true, autoSignIn: false, minPasswordLength: 12, maxPasswordLength: 128 },
-    session: { expiresIn: 60 * 60 * 8, updateAge: 60 * 15 },
-    plugins: [twoFactor({ issuer: d.issuer ?? 'Zenlo Admin' }), revokeOtherSessionsOnEnrollment(d.db)], // no trusted devices: staff re-verify on every sign-in
+    session: { expiresIn: ADMIN_SESSION_SECONDS, updateAge: 60 * 15 },
+    plugins: [sessionCookieOnly(), twoFactor({ issuer: d.issuer ?? 'Zenlo Admin' }), revokeOtherSessionsOnEnrollment(d.db), ...((d.extraPlugins ?? []) as [])], // no trusted devices: staff re-verify on every sign-in
     rateLimit: {
       ...b.rateLimit,
       customRules: {
@@ -184,7 +212,9 @@ export function createAdminAuth(d: AdminAuthDeps) {
               .from(userRoles)
               .where(and(eq(userRoles.userId, session.userId), inArray(userRoles.role, [...STAFF_ROLES])));
             if (!u?.isActive || staff.length === 0) throw new APIError('FORBIDDEN', { message: 'Staff access only' });
-            return { data: session };
+            // Better Auth gives a 'don't remember' session a fixed 24 h in the database; staff sessions never outlive their configured lifetime.
+            const latest = Date.now() + ADMIN_SESSION_SECONDS * 1000;
+            return { data: { ...session, expiresAt: new Date(Math.min(session.expiresAt.getTime(), latest)) } };
           },
         },
       },

@@ -234,6 +234,57 @@ describe('admin auth', () => {
     expect(await admAuthn(req(ADMIN, b.cookie))).not.toBeNull();
   });
 
+  describe('browser-session cookies only', () => {
+    /** Raw Set-Cookie headers: the helper above strips the attributes this test is about. */
+    async function rawPost(path: string, body: unknown, cookie = '', ip = '10.0.5.1') {
+      const headers: Record<string, string> = { 'content-type': 'application/json', origin: ADMIN, 'x-forwarded-for': ip };
+      if (cookie) headers.cookie = cookie;
+      const res = await adm.handler(new Request(`${ADMIN}/api/auth${path}`, { method: 'POST', headers, body: JSON.stringify(body) }));
+      const set = res.headers.getSetCookie();
+      return { status: res.status, set, jar: set.map((c) => c.split(';')[0]).filter((c) => !c.endsWith('=')).join('; ') };
+    }
+    const sessionCookie = (set: string[]) => set.find((c) => /session_token=[^;]+/.test(c) && !/session_token=;/.test(c));
+    const persistent = (c: string) => /max-age|expires/i.test(c);
+    const secretOf = (uri: string) => secretFromUri(uri);
+
+    test('sign-in sets a session-only cookie whatever the client sends for rememberMe', async () => {
+      const s = await staff('support');
+      for (const [i, body] of [{}, { rememberMe: true }, { rememberMe: false }].entries()) {
+        const r = await rawPost('/sign-in/email', { email: s.email, password: PW, ...body }, '', `10.0.5.${10 + i}`);
+        expect(r.status).toBe(200);
+        const c = sessionCookie(r.set)!;
+        expect(c).toBeDefined();
+        expect(persistent(c)).toBe(false); // no Max-Age / Expires: dropped when the browser closes
+      }
+    });
+
+    test('the enrollment confirmation and the sign-in code check also keep it session-only', async () => {
+      const s = await staff('finance');
+      const si = await rawPost('/sign-in/email', { email: s.email, password: PW, rememberMe: true }, '', '10.0.5.20');
+      const enable = await post(adm, ADMIN, '/two-factor/enable', { password: PW }, si.jar);
+      const secret = secretOf(enable.body.totpURI);
+      const code = async () => (await adm.api.generateTOTP({ body: { secret } })).code;
+      const confirm = await rawPost('/two-factor/verify-totp', { code: await code() }, si.jar, '10.0.5.21');
+      expect(confirm.status).toBe(200);
+      expect(persistent(sessionCookie(confirm.set)!)).toBe(false);
+      const again = await rawPost('/sign-in/email', { email: s.email, password: PW, rememberMe: true }, '', '10.0.5.22');
+      const verified = await rawPost('/two-factor/verify-totp', { code: await code() }, again.jar, '10.0.5.23');
+      expect(verified.status).toBe(200);
+      expect(persistent(sessionCookie(verified.set)!)).toBe(false);
+      expect((await admAuthn(req(ADMIN, verified.jar)))?.mfaVerified).toBe(true);
+    });
+
+    test('server-side, no staff session outlives the 8 hour lifetime', async () => {
+      const s = await staff('admin');
+      await rawPost('/sign-in/email', { email: s.email, password: PW, rememberMe: false }, '', '10.0.5.30');
+      await rawPost('/sign-in/email', { email: s.email, password: PW, rememberMe: true }, '', '10.0.5.31');
+      const rows = await pg.db.select({ expiresAt: sessions.expiresAt }).from(sessions).where(eq(sessions.userId, s.userId));
+      expect(rows.length).toBe(2);
+      const limit = Date.now() + 8 * 60 * 60 * 1000 + 5000; // 8 h plus a little clock slack
+      for (const r of rows) expect(r.expiresAt.getTime()).toBeLessThanOrEqual(limit);
+    });
+  });
+
   test('later profile updates do not revoke sessions of an enrolled user', async () => {
     const s = await staff('support');
     const a = await post(adm, ADMIN, '/sign-in/email', { email: s.email, password: PW }, '', '10.0.2.1');
